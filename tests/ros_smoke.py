@@ -1,0 +1,128 @@
+"""Real ROS2 smoke test with synthetic 3D sensors, no robot or motion publisher."""
+import sys
+import time
+import threading
+import tempfile
+from pathlib import Path
+import numpy as np
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
+from geometry_msgs.msg import TransformStamped,PoseWithCovarianceStamped
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header, Bool, Empty, String
+from tf2_ros import TransformBroadcaster,Buffer,TransformListener,TransformException
+from mapper import Mapper,transform_matrix
+from geometry import pose_matrix,quaternion_from_matrix,transform_points
+from test_3d import room
+# stdlib has an operator module; load our node without shadowing it.
+import importlib.util
+spec = importlib.util.spec_from_file_location('go2_operator',Path(__file__).resolve().parents[1]/'go2_3d/operator_bridge.py')
+operator_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(operator_module)
+
+
+def wait_for(predicate,seconds=15):
+    deadline = time.monotonic()+seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise AssertionError('ROS smoke condition did not become true')
+
+
+class Sensors(Node):
+    def __init__(self):
+        super().__init__('synthetic_sensors')
+        self.pub = self.create_publisher(PointCloud2,'/point_cloud2',qos_profile_sensor_data)
+        self.tf = TransformBroadcaster(self)
+        self.buffer = Buffer()
+        self.listener = TransformListener(self.buffer,self)
+        self.initial = self.create_publisher(PoseWithCovarianceStamped,'/initialpose',1)
+        self.save = self.create_publisher(Empty,'/mapping/save',1)
+        self.valid = None
+        self.operator_status = ''
+        self.create_subscription(Bool,'/localization/valid',lambda m: setattr(self,'valid',m.data),1)
+        self.create_subscription(String,'/operator/status',lambda m: setattr(self,'operator_status',m.data),1)
+        self.points = room()
+        self.truth, self.odom = np.eye(4),np.eye(4)
+        self.stop = threading.Event()
+        self.emitter = threading.Thread(target=self.emit,daemon=True)
+
+    def emit(self):
+        while not self.stop.is_set():
+            header = Header(stamp=self.get_clock().now().to_msg(),frame_id='odom')
+            tf = TransformStamped(header=header,child_frame_id='base_link')
+            q,t = quaternion_from_matrix(self.odom),self.odom[:3,3]
+            tf.transform.translation.x,tf.transform.translation.y,tf.transform.translation.z = map(float,t)
+            tf.transform.rotation.x,tf.transform.rotation.y,tf.transform.rotation.z,tf.transform.rotation.w = map(float,q)
+            self.tf.sendTransform(tf)
+            time.sleep(0.03)
+            points = transform_points(self.points,np.linalg.inv(self.truth))
+            self.pub.publish(point_cloud2.create_cloud_xyz32(
+                Header(stamp=header.stamp,frame_id='base_link'),points.astype(np.float32).tolist()))
+            self.stop.wait(0.17)
+
+    def correction_matches(self,expected):
+        try:
+            tf = self.buffer.lookup_transform('map','odom',Time())
+            return np.allclose(transform_matrix(tf.transform),expected,atol=0.04)
+        except TransformException:
+            return False
+
+
+def phase(directory,mode):
+    rclpy.init(args=['--ros-args','-p',f'mode:={mode}','-p',f'output_directory:={directory}',
+                     '-p',f'map_directory:={directory}/latest'])
+    mapper,operator,sensors = Mapper(),operator_module.Operator(),Sensors()
+    executor = MultiThreadedExecutor(num_threads=5)
+    for node in (mapper,operator,sensors):
+        executor.add_node(node)
+    spinner = threading.Thread(target=executor.spin,daemon=True)
+    spinner.start()
+    sensors.emitter.start()
+    try:
+        if mode == 'mapping':
+            wait_for(lambda: len(mapper.points)>100)
+            truth = pose_matrix([0.40,0.0,0.0],[0,0,0,1])
+            odom = pose_matrix([0.48,0.03,0.0],[0,0,0,1])
+            sensors.truth,sensors.odom = truth,odom
+            wait_for(lambda: sensors.correction_matches(truth@np.linalg.inv(odom)))
+            wait_for(lambda: mapper.last_keyframe is not None and mapper.last_keyframe[0,3]>0.3)
+            sensors.save.publish(Empty())
+            wait_for(lambda: 'Save success=True' in sensors.operator_status)
+            for name in ('map.pcd','nav.yaml','nav.pgm','metadata.yaml'):
+                assert (Path(directory)/'latest'/name).is_file(),name
+            assert sensors.valid is False,'Mapping must never enable navigation motion'
+            print('PASS ROS mapping: accepted GICP TF + Foxglove save -> PCD and Nav2 grid')
+        else:
+            wait_for(lambda: sensors.valid is False and mapper.latest is not None)
+            assert not mapper.initialized,'Localization must wait for initialpose'
+            pose = PoseWithCovarianceStamped()
+            pose.header.frame_id = 'map'
+            pose.pose.pose.orientation.w = 1.0
+            sensors.initial.publish(pose)
+            wait_for(lambda: sensors.valid is True)
+            wait_for(lambda: sensors.correction_matches(np.eye(4)))
+            sensors.stop.set()
+            sensors.emitter.join()
+            wait_for(lambda: sensors.valid is False,seconds=5)
+            print('PASS ROS localization: PCD reload + initialpose + GICP + stale-sensor invalidation')
+    finally:
+        sensors.stop.set()
+        sensors.emitter.join(timeout=3)
+        executor.shutdown()
+        spinner.join(timeout=3)
+        for node in (mapper,operator,sensors):
+            node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    with tempfile.TemporaryDirectory() as directory:
+        phase(directory,'mapping')
+        phase(directory,'localization')
