@@ -13,10 +13,10 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profile_sensor_data
 from nav_msgs.msg import OccupancyGrid
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener, TransformException
-from geometry import pose_matrix
+from geometry import pose_matrix, cloud_xyz
 
 
 def cell(grid, xy):
@@ -69,6 +69,7 @@ class NavCheck(Node):
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         kinds = {'/map':OccupancyGrid,'/global_costmap/costmap':OccupancyGrid,
                  '/local_costmap/costmap':OccupancyGrid,'/scan':LaserScan,
+                 '/point_cloud2':PointCloud2,
                  '/localization/valid':Bool,'/localization/status':String,
                  '/operator/status':String}
         for topic,kind in kinds.items():
@@ -131,6 +132,14 @@ class NavCheck(Node):
                 for name,index in (('robot',start),('goal',target)):
                     value = int(data[index[1],index[0]]) if index else None
                     lines.append(f'  {name} cell={index} value={value}: {label(value) if value is not None else "outside grid"}')
+                if target:
+                    lethal = np.argwhere(data == 100)
+                    if len(lethal):
+                        squared = np.sum((lethal-np.array([target[1],target[0]]))**2,axis=1)
+                        row,col = lethal[np.argmin(squared)]
+                        distance = float(np.sqrt(squared.min())*grid.info.resolution)
+                        lines.append(f'  closest lethal cell to goal: cell=({col}, {row}) '
+                                     f'center_distance={distance:.3f}m (quantized grid distance)')
                 lines.append('  connectivity: '+connected(data,start,target))
             except (TransformException,ValueError) as error:
                 lines.append(f'  cell checks unavailable: {error}')
@@ -141,6 +150,26 @@ class NavCheck(Node):
             lines.append(f'/scan: frame={scan.header.frame_id!r} finite_returns={len(ranges)} '
                          f'min={float(ranges.min()) if len(ranges) else "none"}m '
                          f'returns_under_0.6m={np.count_nonzero(ranges<0.6)}')
+            stamp = Time.from_msg(scan.header.stamp)
+            lines.append(f'/scan host_age={(self.get_clock().now()-stamp).nanoseconds/1e9:.3f}s '
+                         f'TF map <- {scan.header.frame_id} at scan stamp='
+                         f'{bool(self.buffer.can_transform("map",scan.header.frame_id,stamp))} '
+                         f'at scan stamp+0.05s={bool(self.buffer.can_transform("map",scan.header.frame_id,Time(nanoseconds=stamp.nanoseconds+50_000_000)))}')
+        packet = self.latest.get('/point_cloud2')
+        if packet:
+            try:
+                tf = self.buffer.lookup_transform('base_link','map',Time())
+                t,q = tf.transform.translation,tf.transform.rotation
+                target = (pose_matrix([t.x,t.y,t.z],[q.x,q.y,q.z,q.w]) @ [*self.goal,0.0,1.0])[:2]
+                points = cloud_xyz(packet)
+                points = points[np.isfinite(points).all(axis=1)]
+                nearby = points[np.linalg.norm(points[:,:2]-target,axis=1)<0.25]
+                lines.append(f'Latest body-cloud packet near goal XY (radius 0.25m): points={len(nearby)}')
+                if len(nearby):
+                    lines.append(f'  body-frame z min/median/max={np.round(np.quantile(nearby[:,2],[0,0.5,1]),3).tolist()}m; '
+                                 f'in current scan height band [-0.2,0.8]m={np.count_nonzero((nearby[:,2]>=-0.2)&(nearby[:,2]<=0.8))}')
+            except (TransformException,ValueError) as error:
+                lines.append(f'  body-cloud goal height check unavailable: {error}')
         return '\n'.join(lines)
 
 

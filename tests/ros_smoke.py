@@ -78,6 +78,9 @@ class Sensors(Node):
         except TransformException:
             return False
 
+    def correction_stamp(self):
+        return Time.from_msg(self.buffer.lookup_transform('map','odom',Time()).header.stamp).nanoseconds
+
 
 def phase(directory,mode,dense=False):
     arguments = ['--ros-args','-p',f'mode:={mode}','-p',f'output_directory:={directory}',
@@ -141,6 +144,14 @@ def phase(directory,mode,dense=False):
             wait_for(lambda: sensors.valid is True)
             wait_for(lambda: 'fine=True' in sensors.localization_status)
             wait_for(lambda: sensors.correction_matches(np.eye(4)))
+            # Nav2 must get timestamped TF between GICP updates. Keep live
+            # odometry while briefly pausing registration, then check that
+            # the held accepted correction advances without future stamps.
+            mapper.registration_timer.cancel()
+            first_stamp = sensors.correction_stamp()
+            wait_for(lambda: sensors.correction_stamp()-first_stamp > 100_000_000,seconds=0.6)
+            assert sensors.correction_stamp() <= sensors.get_clock().now().nanoseconds
+            mapper.registration_timer.reset()
             # A contradictory fresh scan with unchanged odometry must fail,
             # not be smoothed into a valid localization or published TF.
             sensors.truth = pose_matrix([0.12,0,0],[0,0,0,1])
@@ -151,12 +162,18 @@ def phase(directory,mode,dense=False):
             time.sleep(1.0)
             np.testing.assert_allclose(mapper.correction,rejected_correction,atol=1e-8)
             assert sensors.valid is False,'Rejected scan was falsely reported valid'
+            invalid_stamp = sensors.correction_stamp()
+            time.sleep(0.4)
+            assert sensors.correction_stamp() == invalid_stamp,'Rejected localization kept refreshing TF'
             sensors.truth = np.eye(4)
             wait_for(lambda: sensors.valid is True)
             sensors.stop.set()
             sensors.emitter.join()
             wait_for(lambda: sensors.valid is False,seconds=5)
-            print('PASS ROS localization: PCD reload + map-frame initialpose + fine GICP + rejected-jump TF unchanged + stale-sensor invalidation')
+            stale_stamp = sensors.correction_stamp()
+            time.sleep(0.3)
+            assert sensors.correction_stamp() == stale_stamp,'Stale odometry kept refreshing TF'
+            print('PASS ROS localization: PCD reload + fine GICP + live TF between matches + rejected/stale TF stops')
     finally:
         sensors.stop.set()
         sensors.emitter.join(timeout=3)

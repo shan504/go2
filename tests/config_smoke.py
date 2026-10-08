@@ -21,8 +21,8 @@ for name in ('local_costmap','global_costmap'):
     assert cfg['global_frame'] == ('map' if name == 'global_costmap' else 'odom')
     assert cfg['obstacle_layer']['scan']['topic'] == '/scan'
     assert 'voxel_layer' not in cfg['plugins']
-    assert cfg['inflation_layer']['inflation_radius'] == 0.35
-    assert cfg['inflation_layer']['cost_scaling_factor'] == 8.0
+    assert cfg['inflation_layer']['inflation_radius'] == 0.28
+    assert cfg['inflation_layer']['cost_scaling_factor'] == 12.0
     assert cfg['footprint'] == '[[-0.40,-0.22],[-0.40,0.22],[0.40,0.22],[0.40,-0.22]]'
     assert cfg['footprint_padding'] == 0.01
     assert cfg['always_send_full_costmap'] is True

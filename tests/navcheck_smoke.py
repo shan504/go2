@@ -6,12 +6,14 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile,ReliabilityPolicy,DurabilityPolicy
+from rclpy.qos import QoSProfile,ReliabilityPolicy,DurabilityPolicy,qos_profile_sensor_data
 from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import TransformStamped
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool,Header
+from sensor_msgs.msg import LaserScan,PointCloud2
 from tf2_ros import StaticTransformBroadcaster
 from navcheck import NavCheck,cell,connected
+from ros_cloud import xyz_message
 import numpy as np
 
 rclpy.init()
@@ -21,6 +23,8 @@ retained=QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
 map_pub=source.create_publisher(OccupancyGrid,'/map',retained)
 local_pub=source.create_publisher(OccupancyGrid,'/local_costmap/costmap',retained)
 valid_pub=source.create_publisher(Bool,'/localization/valid',10)
+scan_pub=source.create_publisher(LaserScan,'/scan',qos_profile_sensor_data)
+cloud_pub=source.create_publisher(PointCloud2,'/point_cloud2',qos_profile_sensor_data)
 broadcaster=StaticTransformBroadcaster(source)
 frames=[]
 for parent,child,x in [('map','odom',0.5),('odom','base_link',0.2)]:
@@ -50,6 +54,10 @@ node=NavCheck((2.25,0.75))
 deadline=time.monotonic()+3
 while time.monotonic()<deadline:
     valid_pub.publish(Bool(data=True))
+    header=Header(stamp=source.get_clock().now().to_msg(),frame_id='base_link')
+    scan=LaserScan(header=header,range_min=0.35,range_max=20.0,ranges=[0.5,1.0,float('inf')])
+    scan_pub.publish(scan)
+    cloud_pub.publish(xyz_message(header,np.array([[1.55,0.5,-0.18],[1.55,0.5,0.4],[8,8,0.3]])))
     rclpy.spin_once(node,timeout_sec=0.1)
 summary=node.summary()
 print(summary)
@@ -62,6 +70,11 @@ assert 'robot cell=(0, 0) value=0: free' in summary
 assert 'goal cell=(4, 1) value=0: free' in summary
 assert 'goal cell=(3, 1) value=0: free' in summary
 assert summary.count('NO: disconnected at cell-center level')==2
+assert 'closest lethal cell to goal:' in summary
+assert 'at scan stamp+0.05s=True' in summary
+assert 'finite_returns=2' in summary
+assert 'near goal XY (radius 0.25m): points=2' in summary
+assert 'in current scan height band [-0.2,0.8]m=2' in summary
 data[1,4]=-1
 assert connected(data,(1,0),(4,1))=='NO: goal cell blocked'
 data[:,2]=98

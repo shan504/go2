@@ -122,7 +122,13 @@ SDK 配置检查使用上游提交 `b440609591a249e7bdd4bbc88e056a3660575447`。
 稠密配置另经 ROS 三维传感器建图/定位测试，100 万点 XYZ 消息通过实际 ROS CDR 序列化往返。
 用户已在 ARM64 镜像中通过原版算法与 ROS 接口测试，实机诊断确认相机、三维雷达、地图及 GICP TF 有数据。
 用户已确认稠密配置下 GICP 曾连续有效，Nav2 控制器与规划器为 active；随后静止匹配仍有间歇拒绝。
-**新增细配准和滤波尚待实机验证；定位精度、导航路径与真实运动仍待现场验收。**
+用户后续实机诊断确认细 GICP 有效，fitness=1.000、RMSE=0.025m；失败目标在全局和局部
+代价地图均为 99，静态地图为自由单元。RMSE 是匹配残差，不代表真实定位误差。
+**导航路径与真实运动仍待现场验收。**
+局部地图为 4×4 米、5 厘米分辨率；膨胀半径参数 0.28 米、衰减系数 12，保留外形碰撞检查。
+接受的校正在有效期内按真实里程计时间最多 20 Hz 发布 TF；ROS 测试验证匹配间持续更新，
+拒绝匹配/数据过期后停止刷新。Humble MessageFilter 测试复现延迟 TF 的激光超时丢弃，
+连续 TF 下测试扫描全部通过；该修复还需实机检查。
 云端完整 Nav2 镜像构建被 ROS 软件源网络访问阻止；模拟测试镜像使用已有 ROS2 基础依赖
 及签名验证的 Ubuntu Open3D 软件包。不能把这些测试等同于机器狗已完成导航。
 
@@ -133,3 +139,12 @@ OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1 python3 -m unittest discover -s tests -
 ```
 
 依赖：`numpy`、`PyYAML`、`open3d`。`tests/ros_smoke.py` 另需 ROS2 Humble。
+
+ROS2 Humble 环境中的只读导航诊断测试：`python3 tests/navcheck_smoke.py`。
+TF 过滤回归需 Humble 的 rclcpp、tf2_ros、sensor_msgs 和 message_filters 开发包：
+
+```bash
+cmake -S tests/tf_filter -B /tmp/go2-tf-filter-build
+cmake --build /tmp/go2-tf-filter-build -j2
+/tmp/go2-tf-filter-build/filter_check
+```

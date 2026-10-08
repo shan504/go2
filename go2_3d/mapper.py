@@ -63,6 +63,7 @@ class Mapper(Node):
         self.seeded = False
         self.last_accepted = None
         self.accepted_odom = None
+        self.last_tf_stamp = None
         self.last_keyframe = None
         self.last_keyframe_time = None
         self.points = np.empty((0,3))
@@ -90,9 +91,13 @@ class Mapper(Node):
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.initial_pose, 1)
         self.create_service(Trigger, '/save_3d_map', self.save_map)
         self.create_timer(0.1, self.health)
+        # Nav2 needs transforms between GICP results, not only at the older
+        # scan stamp after a registration finishes. Hold only a fresh accepted
+        # map correction, timestamped by actual odometry (never future-dated).
+        self.create_timer(0.05, self.publish_correction)
         self.create_timer(self.p['map_publish_period'], self.publish_map)
-        self.create_timer(self.p['registration_period'], self.process,
-                          callback_group=MutuallyExclusiveCallbackGroup())
+        self.registration_timer = self.create_timer(self.p['registration_period'], self.process,
+                                                    callback_group=MutuallyExclusiveCallbackGroup())
 
     def report(self, text):
         self.status_pub.publish(String(data=text))
@@ -246,14 +251,6 @@ class Mapper(Node):
                         self.last_keyframe_time = now
                 self.last_accepted = received
                 self.accepted_odom = odom_base.copy()
-                transform = TransformStamped()
-                transform.header.stamp = message.header.stamp
-                transform.header.frame_id, transform.child_frame_id = 'map','odom'
-                t = self.correction[:3,3]
-                q = quaternion_from_matrix(self.correction)
-                transform.transform.translation.x, transform.transform.translation.y, transform.transform.translation.z = map(float,t)
-                transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z, transform.transform.rotation.w = map(float,q)
-                self.broadcaster.sendTransform(transform)
                 header = Header(stamp=message.header.stamp,frame_id='map')
                 self.registered_pub.publish(xyz_message(header,new))
             self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}'))
@@ -269,6 +266,30 @@ class Mapper(Node):
             valid = (self.p['mode'] == 'localization' and self.last_accepted is not None and
                      time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
         self.valid_pub.publish(Bool(data=valid))
+
+    def publish_correction(self):
+        with self.lock:
+            if (not self.seeded or self.last_accepted is None or
+                    time.monotonic()-self.last_accepted > self.p['validity_timeout']):
+                return
+            try:
+                odom = self.buffer.lookup_transform('odom','base_link',Time())
+            except TransformException:
+                return
+            stamp = Time.from_msg(odom.header.stamp)
+            age = (self.get_clock().now()-stamp).nanoseconds/1e9
+            if not -0.1 <= age <= self.p['validity_timeout']:
+                return
+            if self.last_tf_stamp is not None and stamp.nanoseconds <= self.last_tf_stamp:
+                return
+            transform = TransformStamped()
+            transform.header.stamp = odom.header.stamp
+            transform.header.frame_id,transform.child_frame_id = 'map','odom'
+            t,q = self.correction[:3,3],quaternion_from_matrix(self.correction)
+            transform.transform.translation.x,transform.transform.translation.y,transform.transform.translation.z = map(float,t)
+            transform.transform.rotation.x,transform.transform.rotation.y,transform.transform.rotation.z,transform.transform.rotation.w = map(float,q)
+            self.broadcaster.sendTransform(transform)
+            self.last_tf_stamp = stamp.nanoseconds
 
     def publish_map(self):
         with self.lock:

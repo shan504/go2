@@ -62,12 +62,12 @@
         "/global_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.65
+          "alpha": 0.3
         },
         "/local_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.65
+          "alpha": 0.3
         },
         "/plan": {
           "visible": true
@@ -165,12 +165,12 @@
         "/global_costmap/costmap": {
           "visible": true,
           "colorMode": "costmap",
-          "alpha": 0.65
+          "alpha": 0.3
         },
         "/local_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.65
+          "alpha": 0.3
         },
         "/plan": {
           "visible": true
@@ -295,12 +295,12 @@
         "/global_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.65
+          "alpha": 0.3
         },
         "/local_costmap/costmap": {
           "visible": false,
           "colorMode": "costmap",
-          "alpha": 0.65
+          "alpha": 0.3
         },
         "/plan": {
           "visible": true
