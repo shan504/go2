@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-check}" in
+  diagnose)
+    sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && timeout 30 python3 /opt/go2_project/go2_3d/diagnose.py'
+    ;;
   check)
     sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 topic list -t && timeout 10 ros2 topic echo /localization/status --once'
     ;;
@@ -15,5 +18,5 @@ case "${1:-check}" in
   shell)
     sudo docker exec -it go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec bash --norc'
     ;;
-  *) echo 'Usage: tools.sh [check|save|enable|disable|shell]' >&2; exit 2 ;;
+  *) echo 'Usage: tools.sh [check|diagnose|save|enable|disable|shell]' >&2; exit 2 ;;
 esac

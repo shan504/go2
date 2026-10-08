@@ -23,6 +23,19 @@
 `First camera sample published` 且图像实际刷新才算接通。RPC 超时或非零状态码需要检查固件接口，
 不能靠改话题名解决。
 
+点云或三维地图未显示时，在第二个 SSH 终端运行：
+
+```bash
+cd ~/go2_nav
+git pull --ff-only
+bash go2_3d/tools.sh diagnose
+```
+
+这会在当前容器中只读采样 12 秒，输出原始与桥接消息数、frame、时间戳、有效 XYZ、
+地图数据及两段 TF。文件通过目录挂载生效，不需要重建镜像或重启建图。
+Foxglove 订阅日志仅证明订阅建立，不证明收到数据。可暂时将固定/显示参考系都设成
+`base_link`，展开“主题”并开启 `/point_cloud2`；建图成功后切回 `map` 并开启 `/map_cloud`。
+
 ## 建图与保存
 
 SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用遥控器缓慢走动。
