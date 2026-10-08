@@ -78,7 +78,7 @@ SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用
 设置为手动单次发布，避免自动重复保存或重复启用。
 
 保存时点击发布，检查 `/operator/status` 中出现 `Save success=True`，并包含保存目录。
-成功意味着同一个目录同时包含 `map.pcd`、`nav.pgm`、`nav.yaml` 和 `metadata.yaml`。
+成功意味着同一个目录同时包含 `map.pcd`、`nav.pgm`、`nav.yaml`、`metadata.yaml` 和 `observed_free.npz`。
 失败时保留诊断，不把部分生成文件用作导航地图。
 
 ## 初始化定位/重定位
@@ -158,6 +158,10 @@ ros2 topic echo /localization/valid
 若机器人在其他位置，应填写其真实地图位置及朝向，不能照用零位姿。
 **每次重新运行 `run.sh navigation dense` 都需要重新设置初始位姿**，保存的地图不会自动
 恢复机器狗当前位姿。启动终端要保持运行，在第二个 SSH 终端初始化和检查。
+也可直接运行 `bash go2_3d/run.sh navigation dense X Y YAW_DEGREES [Z]`，
+让程序在收到新鲜点云和里程计后发布一次这个实际位姿提示；仍须通过 GICP。
+零位姿只用于实际回到建图起点、同朝向和高度。程序不会猜测机器狗已回到起点。
+Nav2 保持未激活，直到 GICP 与新鲜 TF 就绪；查看 `/navigation/startup_status`。
 启动终端按 Ctrl+C 会关闭整个栈并删除 `go2-3d` 容器；此后 `tools.sh` 会报容器不存在。
 
 没有 `map → odom` 时，全局代价地图会等待 `base_link → map`，局部代价地图也不能
@@ -203,6 +207,14 @@ ros2 lifecycle get /planner_server
 Ctrl+C 后的 ROS context invalid 错误属于关闭阶段，不能据此判断运动桥故障。
 
 ## 代价地图与规划失败
+
+旧版导航栅格按固定 map 高度切片，并仅保留每个方向最近回波的自由射线，
+可能把倾斜地面当障碍、漏掉已观测的远处空地。停止导航后，运行
+`bash ~/go2_nav/go2_3d/tools.sh repair-map` 修复已有图：估计起点附近地面，
+按距地面的高度投影障碍，并用真实地面端点补充空地。
+修复保留原始 PCD 和旧目录，新版导航要求已有地面模型。新建地图保存时自动生成模型。
+实时 `/navigation/obstacle_cloud` 使用同一地面模型及点云采集时间的 TF；未知角度不当作无障碍远距离射线清除。
+三维 PCD 自身的漂移或重影不属于这个投影修复范围。
 
 局部代价地图是跟随机器狗的 `4 × 4 米` 窗口，分辨率 5 厘米；全局代价地图与
 保存的二维地图范围一致。两者膨胀半径为 28 厘米、衰减系数为 12，外形仍为

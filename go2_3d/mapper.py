@@ -24,6 +24,7 @@ from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
                       cloud_xyz, filter_points, rotation_angle, ObservedGrid)
 from registration import cloud, align, static_correction_is_consistent, blend_correction
 from ros_cloud import xyz_message
+from ground import estimate_ground
 
 
 def transform_matrix(transform):
@@ -44,7 +45,8 @@ class Mapper(Node):
                         correspondence_distance=0.7, min_fitness=0.55, max_rmse=0.20,
                         max_translation=0.6, max_rotation=0.35,
                         localization_voxel_size=0.05, localization_correspondence=0.20,
-                        correction_alpha=0.25)
+                        correction_alpha=0.25,auto_initialize=False,
+                        initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self.p = {k: self.get_parameter(k).value for k in defaults}
@@ -64,6 +66,8 @@ class Mapper(Node):
         self.last_accepted = None
         self.accepted_odom = None
         self.last_tf_stamp = None
+        self.initial_hint_used = False
+        self.waiting_status_time = 0.0
         self.last_keyframe = None
         self.last_keyframe_time = None
         self.points = np.empty((0,3))
@@ -123,6 +127,16 @@ class Mapper(Node):
             if self.first_received is None:
                 self.first_received = self.latest[2]
             self.history.append(self.latest)
+        if (self.p['mode'] == 'localization' and self.p['auto_initialize'] and
+                not self.initial_hint_used):
+            self.initial_hint_used = True
+            hint = PoseWithCovarianceStamped()
+            hint.header.frame_id = 'map'
+            p,q = hint.pose.pose.position,hint.pose.pose.orientation
+            p.x,p.y,p.z = self.p['initial_x'],self.p['initial_y'],self.p['initial_z']
+            angle = np.deg2rad(self.p['initial_yaw_degrees'])/2
+            q.z,q.w = float(np.sin(angle)),float(np.cos(angle))
+            self.initial_pose(hint)
 
     def initial_pose(self, message):
         if self.p['mode'] != 'localization' or message.header.frame_id != 'map':
@@ -265,6 +279,11 @@ class Mapper(Node):
         with self.lock:
             valid = (self.p['mode'] == 'localization' and self.last_accepted is not None and
                      time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
+            if self.p['mode']=='localization' and not self.initialized and time.monotonic()-self.waiting_status_time>2:
+                text = ('Waiting for fresh cloud and timestamped odometry' if self.latest is None else
+                        'Waiting for actual initial map pose; Nav2 startup deferred')
+                self.status_pub.publish(String(data=text))
+                self.waiting_status_time = time.monotonic()
         self.valid_pub.publish(Bool(data=valid))
 
     def publish_correction(self):
@@ -315,9 +334,10 @@ class Mapper(Node):
                 raise RuntimeError('PCD write failed')
             grid = ObservedGrid(self.p['grid_resolution'])
             grid.free = free
-            grid.export(points,directory,self.p['floor_z'],self.p['obstacle_min_height'],self.p['obstacle_max_height'])
+            ground = estimate_ground(points,self.p['floor_z'])
+            grid.export(points,directory,self.p['floor_z'],self.p['obstacle_min_height'],self.p['obstacle_max_height'],ground)
             (directory/'metadata.yaml').write_text(yaml.safe_dump(dict(frame_id='map',parameters=self.p,
-                map_type='incremental GICP scan-to-map; no loop closure',point_count=len(points))))
+                ground_model=ground,map_type='incremental GICP scan-to-map; no loop closure',point_count=len(points))))
             link = root/'.latest-new'
             if link.is_symlink():
                 link.unlink()

@@ -32,7 +32,7 @@ def main():
         params['static_layer'] = {'plugin':'nav2_costmap_2d::StaticLayer', 'map_subscribe_transient_local':True}
         params['obstacle_layer'] = {'plugin':'nav2_costmap_2d::ObstacleLayer',
             'observation_sources':'scan', 'scan':{'topic':'/scan','data_type':'LaserScan',
-            'clearing':True,'marking':True,'inf_is_valid':True,'max_obstacle_height':2.0,
+            'clearing':True,'marking':True,'inf_is_valid':False,'max_obstacle_height':2.0,
             'raytrace_min_range':0.35,'raytrace_max_range':15.0,
             'obstacle_min_range':0.35,'obstacle_max_range':12.0}}
         params['inflation_layer'] = {'plugin':'nav2_costmap_2d::InflationLayer',

@@ -48,4 +48,5 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
                           if getattr(action, 'condition', None) is not None]
             assert conditions == [True, False], conditions
             assert context.launch_configurations['use_composition'] == 'False'
+            assert context.launch_configurations['autostart'] == 'false'
         print(f'PASS launch conditions: {mode}')

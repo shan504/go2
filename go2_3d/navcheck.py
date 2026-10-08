@@ -16,7 +16,8 @@ from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener, TransformException
-from geometry import pose_matrix, cloud_xyz
+from geometry import pose_matrix, cloud_xyz, transform_points
+from ground import heights
 
 
 def cell(grid, xy):
@@ -166,8 +167,17 @@ class NavCheck(Node):
                 nearby = points[np.linalg.norm(points[:,:2]-target,axis=1)<0.25]
                 lines.append(f'Latest body-cloud packet near goal XY (radius 0.25m): points={len(nearby)}')
                 if len(nearby):
-                    lines.append(f'  body-frame z min/median/max={np.round(np.quantile(nearby[:,2],[0,0.5,1]),3).tolist()}m; '
-                                 f'in current scan height band [-0.2,0.8]m={np.count_nonzero((nearby[:,2]>=-0.2)&(nearby[:,2]<=0.8))}')
+                    lines.append(f'  body-frame z min/median/max={np.round(np.quantile(nearby[:,2],[0,0.5,1]),3).tolist()}m')
+                    metadata_path = Path('/maps/latest/metadata.yaml')
+                    metadata = yaml.safe_load(metadata_path.read_text()) if metadata_path.exists() else {}
+                    if 'ground_model' in metadata:
+                        body_from_map = pose_matrix([t.x,t.y,t.z],[q.x,q.y,q.z,q.w])
+                        h = heights(transform_points(nearby,np.linalg.inv(body_from_map)),metadata['ground_model'])
+                        p = metadata['parameters']
+                        selected = (h>=p['obstacle_min_height'])&(h<=p['obstacle_max_height'])
+                        lines.append(f'  ground-relative height min/median/max={np.round(np.quantile(h,[0,0.5,1]),3).tolist()}m; obstacle points={np.count_nonzero(selected)}')
+                    else:
+                        lines.append('  Legacy map lacks a ground model; run tools.sh repair-map before navigation')
             except (TransformException,ValueError) as error:
                 lines.append(f'  body-cloud goal height check unavailable: {error}')
         return '\n'.join(lines)

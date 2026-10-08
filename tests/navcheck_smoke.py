@@ -74,7 +74,7 @@ assert 'closest lethal cell to goal:' in summary
 assert 'at scan stamp+0.05s=True' in summary
 assert 'finite_returns=2' in summary
 assert 'near goal XY (radius 0.25m): points=2' in summary
-assert 'in current scan height band [-0.2,0.8]m=2' in summary
+assert 'Legacy map lacks a ground model' in summary
 data[1,4]=-1
 assert connected(data,(1,0),(4,1))=='NO: goal cell blocked'
 data[:,2]=98

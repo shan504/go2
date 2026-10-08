@@ -82,11 +82,13 @@ class Sensors(Node):
         return Time.from_msg(self.buffer.lookup_transform('map','odom',Time()).header.stamp).nanoseconds
 
 
-def phase(directory,mode,dense=False):
+def phase(directory,mode,dense=False,auto=False):
     arguments = ['--ros-args','-p',f'mode:={mode}','-p',f'output_directory:={directory}',
                  '-p',f'map_directory:={directory}/latest']
     if dense:
         arguments += ['--params-file',str(Path(__file__).resolve().parents[1]/'go2_3d/gicp_dense.yaml')]
+    if auto:
+        arguments += ['-p','auto_initialize:=true','-p','initial_x:=0.0','-p','initial_y:=0.0','-p','initial_yaw_degrees:=0.0']
     rclpy.init(args=arguments)
     mapper,operator,sensors = Mapper(),operator_module.Operator(),Sensors()
     if mode == 'mapping':
@@ -132,16 +134,19 @@ def phase(directory,mode,dense=False):
             assert sensors.valid is False,'Mapping must never enable navigation motion'
             print('PASS ROS mapping: stationary 3D enrichment + map-frame registered scan + GICP TF + dense PCD and Nav2 grid')
         else:
-            wait_for(lambda: sensors.valid is False and mapper.latest is not None)
-            assert not mapper.initialized,'Localization must wait for initialpose'
-            pose = PoseWithCovarianceStamped()
-            pose.pose.pose.orientation.w = 1.0
-            sensors.initial.publish(pose)
-            time.sleep(0.3)
-            assert not mapper.initialized,'An empty frame_id must not initialize localization'
-            pose.header.frame_id = 'map'
-            sensors.initial.publish(pose)
+            if not auto:
+                wait_for(lambda: sensors.valid is False and mapper.latest is not None)
+                assert not mapper.initialized,'Localization must wait for initialpose'
+                pose = PoseWithCovarianceStamped()
+                pose.pose.pose.orientation.w = 1.0
+                sensors.initial.publish(pose)
+                time.sleep(0.3)
+                assert not mapper.initialized,'An empty frame_id must not initialize localization'
+                pose.header.frame_id = 'map'
+                sensors.initial.publish(pose)
             wait_for(lambda: sensors.valid is True)
+            if auto:
+                assert mapper.initial_hint_used,'Numerical startup pose was not used'
             wait_for(lambda: 'fine=True' in sensors.localization_status)
             wait_for(lambda: sensors.correction_matches(np.eye(4)))
             # Nav2 must get timestamped TF between GICP updates. Keep live
@@ -198,3 +203,4 @@ if __name__ == '__main__':
     with tempfile.TemporaryDirectory() as directory:
         phase(directory,'mapping',dense)
         phase(directory,'localization',dense)
+        phase(directory,'localization',dense,auto=True)

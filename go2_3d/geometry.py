@@ -112,9 +112,20 @@ class ObservedGrid:
         if len(self.free) > self.max_cells:
             raise RuntimeError("Observed-space limit exceeded; save a smaller map")
 
-    def export(self, points, directory, floor_z=-0.30, min_height=0.10, max_height=1.5):
-        obstacle = points[(points[:,2] >= floor_z+min_height) &
-                          (points[:,2] <= floor_z+max_height)]
+    def export(self, points, directory, floor_z=-0.30, min_height=0.10, max_height=1.5,
+               ground_model=None):
+        if ground_model is None:
+            obstacle = points[(points[:,2] >= floor_z+min_height) &
+                              (points[:,2] <= floor_z+max_height)]
+        else:
+            from ground import floor_and_obstacles
+            floor,obstacle = floor_and_obstacles(points,ground_model,min_height,max_height)
+            # Actual observed floor endpoints provide free-space evidence.
+            # A near floor hit must not hide every farther floor hit in the
+            # same azimuth, as happened with nearest-return-only clearing.
+            cells,counts = np.unique(np.floor(floor[:,:2]/self.resolution).astype(int),
+                                     axis=0,return_counts=True)
+            self.free.update(map(tuple,cells[counts>=2]))
         occupied = set(map(tuple, np.floor(obstacle[:,:2]/self.resolution).astype(int)))
         observed = self.free | occupied
         if not occupied or not self.free:
@@ -135,4 +146,5 @@ class ObservedGrid:
                         origin=[float(lower[0]*self.resolution), float(lower[1]*self.resolution), 0.0],
                         negate=0, occupied_thresh=0.65, free_thresh=0.196)
         (directory/'nav.yaml').write_text(yaml.safe_dump(metadata))
+        np.savez_compressed(directory/'observed_free.npz',cells=np.asarray(list(self.free),dtype=np.int32))
         return metadata

@@ -5,6 +5,14 @@ mode="${1:-mapping}"
 profile="${2:-standard}"
 case "$mode" in mapping|localization|navigation) ;; *) echo 'Usage: run.sh [mapping|localization|navigation] [standard|dense]' >&2; exit 2 ;; esac
 case "$profile" in standard|dense) ;; *) echo 'Profile must be standard or dense' >&2; exit 2 ;; esac
+auto_initialize=false
+initial_x=0.0; initial_y=0.0; initial_yaw=0.0; initial_z=0.0
+if (( $# > 2 )); then
+  [[ "$mode" != mapping && ( $# == 5 || $# == 6 ) ]] || { echo 'Usage: run.sh navigation dense X Y YAW_DEGREES [Z] (actual map pose)' >&2; exit 2; }
+  initial_x="$3"; initial_y="$4"; initial_yaw="$5"; initial_z="${6:-0.0}"
+  python3 -c 'import sys,math; assert all(math.isfinite(float(s)) for s in sys.argv[1:]), "Pose must be finite"' "$initial_x" "$initial_y" "$initial_yaw" "$initial_z"
+  auto_initialize=true
+fi
 gicp_params=/opt/go2_project/go2_3d/gicp.yaml
 [[ "$profile" == dense ]] && gicp_params=/opt/go2_project/go2_3d/gicp_dense.yaml
 dds_file="$HOME/cyclonedds_ws/cyclonedds.xml"
@@ -16,6 +24,11 @@ if [[ "$mode" != mapping ]]; then
 fi
 mkdir -p "$project_dir/maps" "$project_dir/runtime"
 sudo docker image inspect go2-3d:edu >/dev/null
+if [[ "$mode" == navigation ]]; then
+  sudo docker run --rm --network none --entrypoint /bin/bash \
+    -v "$project_dir/maps:/maps:ro" go2-3d:edu -c \
+    'python3 -c '\''import yaml; assert "ground_model" in yaml.safe_load(open("/maps/latest/metadata.yaml")), "Legacy navigation grid: run tools.sh repair-map before navigation"'\'''
+fi
 # Validate dependencies, SDK assets and generated copies before stopping sensors.
 sudo docker run --rm --network none --entrypoint /bin/bash \
   -v "$project_dir:/opt/go2_project:ro" -v "$project_dir/runtime:/runtime:rw" \
@@ -43,4 +56,4 @@ sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --
   -v "$project_dir:/opt/go2_project:ro" \
   -v "$project_dir/runtime:/runtime:ro" -v "$project_dir/maps:/maps:rw" \
   --entrypoint /bin/bash go2-3d:edu -c \
-  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2"' bash "$mode" "$gicp_params"
+  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z"
