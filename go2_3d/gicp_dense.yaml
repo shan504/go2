@@ -1,0 +1,12 @@
+go2_gicp:
+  ros__parameters:
+    # Retention resolution, not a claim of 2 cm positioning accuracy.
+    map_voxel_size: 0.02
+    max_map_points: 1000000
+    keyframe_max_interval: 0.5
+    # Timestamp-aligned scan packets fill the LiDAR's nonrepeating pattern.
+    scan_window: 0.5
+    map_publish_period: 3.0
+    # Keep registration coarse and bounded on the 7.2 GiB ARM64 computer.
+    voxel_size: 0.15
+    registration_period: 0.5

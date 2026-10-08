@@ -77,9 +77,12 @@ class Sensors(Node):
             return False
 
 
-def phase(directory,mode):
-    rclpy.init(args=['--ros-args','-p',f'mode:={mode}','-p',f'output_directory:={directory}',
-                     '-p',f'map_directory:={directory}/latest'])
+def phase(directory,mode,dense=False):
+    arguments = ['--ros-args','-p',f'mode:={mode}','-p',f'output_directory:={directory}',
+                 '-p',f'map_directory:={directory}/latest']
+    if dense:
+        arguments += ['--params-file',str(Path(__file__).resolve().parents[1]/'go2_3d/gicp_dense.yaml')]
+    rclpy.init(args=arguments)
     mapper,operator,sensors = Mapper(),operator_module.Operator(),Sensors()
     if mode == 'mapping':
         sensors.points = room()[::2]
@@ -101,6 +104,14 @@ def phase(directory,mode):
             assert sensors.registered.header.frame_id == 'map'
             assert np.ptp(cloud_xyz(sensors.registered)[:,2])>2.0,'Registered scan lost 3D height'
             assert np.ptp(mapper.points[:,2])>2.0,'Map lost 3D height'
+            assert len(mapper.registration_points)<len(mapper.points),'Registration target uses full dense map'
+            # Publish/deserialize real ROS cloud payload, including fine XYZ.
+            packed = sensors.registered
+            assert packed.point_step == 12 and len(packed.data) == packed.width*12
+            if dense:
+                assert mapper.p['map_voxel_size'] == 0.02
+                assert mapper.p['max_map_points'] == 1000000
+                assert len(mapper.history)>1
             truth = pose_matrix([0.40,0.0,0.0],[0,0,0,1])
             odom = pose_matrix([0.48,0.03,0.0],[0,0,0,1])
             sensors.truth,sensors.odom = truth,odom
@@ -139,6 +150,16 @@ def phase(directory,mode):
 
 
 if __name__ == '__main__':
+    dense = '--dense' in sys.argv[1:]
+    if dense:
+        from ros_cloud import xyz_message
+        from rclpy.serialization import serialize_message,deserialize_message
+        million = np.random.default_rng(42).uniform([-5,-5,-0.3],[5,5,2.0],(1000000,3))
+        message = xyz_message(Header(frame_id='map'),million)
+        decoded = deserialize_message(serialize_message(message),PointCloud2)
+        assert decoded.width == 1000000 and decoded.row_step == 12000000
+        np.testing.assert_allclose(cloud_xyz(decoded)[::10000],million[::10000],atol=1e-6)
+        print('PASS dense payload: 1,000,000 XYZ points survived ROS CDR serialization')
     with tempfile.TemporaryDirectory() as directory:
-        phase(directory,'mapping')
-        phase(directory,'localization')
+        phase(directory,'mapping',dense)
+        phase(directory,'localization',dense)

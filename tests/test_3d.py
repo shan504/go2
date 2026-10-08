@@ -10,7 +10,7 @@ import open3d as o3d
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
 from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
                       cloud_xyz, filter_points, ObservedGrid)
-from registration import cloud, align
+from registration import cloud, align, static_correction_is_consistent
 
 
 def room():
@@ -68,6 +68,21 @@ class GeometryTests(unittest.TestCase):
 
 
 class GICPTests(unittest.TestCase):
+    def test_stationary_false_match_jump_rejected(self):
+        prior = np.eye(4)
+        jitter = pose_matrix([0.147,0,0],[0,0,math.sin(math.radians(5.2)/2),math.cos(math.radians(5.2)/2)])
+        tiny_odom_motion = pose_matrix([0.001,0.002,0],[0,0,0,1])
+        self.assertFalse(static_correction_is_consistent(prior,jitter,prior,tiny_odom_motion))
+        small = pose_matrix([0.01,0.01,0],[0,0,math.sin(0.01/2),math.cos(0.01/2)])
+        self.assertTrue(static_correction_is_consistent(prior,small,prior,tiny_odom_motion))
+
+    def test_robot_motion_and_explicit_reseed_allowed(self):
+        prior = np.eye(4)
+        correction = pose_matrix([0.1,0,0],[0,0,0,1])
+        moving_odom = pose_matrix([0.4,0,0],[0,0,0,1])
+        self.assertTrue(static_correction_is_consistent(prior,correction,prior,moving_odom))
+        self.assertTrue(static_correction_is_consistent(prior,correction,None,prior))
+
     def test_known_3d_pose_and_pcd_reload(self):
         points = room()
         truth = pose_matrix([0.45,-0.23,0.10],[0,0,math.sin(0.10/2),math.cos(0.10/2)])

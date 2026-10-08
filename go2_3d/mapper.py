@@ -3,6 +3,7 @@
 import os
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
@@ -17,12 +18,12 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profi
 from std_msgs.msg import Bool, String, Header
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import PointCloud2
-from sensor_msgs_py import point_cloud2
 from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
 from tf2_ros import Buffer, TransformListener, TransformBroadcaster, TransformException
 from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
                       cloud_xyz, filter_points, rotation_angle, ObservedGrid)
-from registration import cloud, align
+from registration import cloud, align, static_correction_is_consistent
+from ros_cloud import xyz_message
 
 
 def transform_matrix(transform):
@@ -35,6 +36,7 @@ class Mapper(Node):
         super().__init__('go2_gicp')
         defaults = dict(mode='mapping', map_directory='/maps/latest', output_directory='/maps',
                         voxel_size=0.15, map_voxel_size=0.06, keyframe_max_interval=2.0,
+                        scan_window=0.0, map_publish_period=2.0,
                         grid_resolution=0.10, floor_z=-0.30,
                         obstacle_min_height=0.10, obstacle_max_height=1.5,
                         max_map_points=200000, submap_radius=25.0,
@@ -49,20 +51,25 @@ class Mapper(Node):
         self.lock = threading.RLock()
         self.generation = 0
         self.latest = None
+        self.history = deque(maxlen=32)
+        self.first_received = None
         self.processed_stamp = None
         self.correction = np.eye(4)
         self.initialized = self.p['mode'] == 'mapping'
         self.seeded = False
         self.last_accepted = None
+        self.accepted_odom = None
         self.last_keyframe = None
         self.last_keyframe_time = None
         self.points = np.empty((0,3))
+        self.registration_points = np.empty((0,3))
         self.grid = ObservedGrid(self.p['grid_resolution'])
         if self.p['mode'] == 'localization':
             directory = Path(self.p['map_directory'])
             self.points = np.asarray(o3d.io.read_point_cloud(str(directory/'map.pcd')).points).copy()
             if len(self.points) < 100:
                 raise ValueError('Missing/empty 3D map.pcd; localization cannot start')
+            self.registration_points = np.asarray(cloud(self.points,self.p['voxel_size']).points).copy()
             self.get_logger().info('Loaded 3D map; waiting for /initialpose in map frame')
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
@@ -77,7 +84,7 @@ class Mapper(Node):
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.initial_pose, 1)
         self.create_service(Trigger, '/save_3d_map', self.save_map)
         self.create_timer(0.1, self.health)
-        self.create_timer(2.0, self.publish_map)
+        self.create_timer(self.p['map_publish_period'], self.publish_map)
         self.create_timer(self.p['registration_period'], self.process,
                           callback_group=MutuallyExclusiveCallbackGroup())
 
@@ -99,7 +106,12 @@ class Mapper(Node):
             self.get_logger().warning('Waiting for odom -> base_link at cloud timestamp', throttle_duration_sec=5)
             return
         with self.lock:
+            if self.latest is not None and Time.from_msg(message.header.stamp) <= Time.from_msg(self.latest[0].header.stamp):
+                return
             self.latest = (message, matrix, time.monotonic())
+            if self.first_received is None:
+                self.first_received = self.latest[2]
+            self.history.append(self.latest)
 
     def initial_pose(self, message):
         if self.p['mode'] != 'localization' or message.header.frame_id != 'map':
@@ -119,6 +131,7 @@ class Mapper(Node):
             self.correction = map_base @ np.linalg.inv(self.latest[1])
             self.initialized, self.seeded = True, False
             self.last_accepted = None
+            self.accepted_odom = None
             self.processed_stamp = None
             self.generation += 1
         self.report('Initial-pose seed received; waiting for accepted GICP match')
@@ -128,14 +141,30 @@ class Mapper(Node):
             if self.latest is None or not self.initialized or time.monotonic()-self.latest[2] > 1.0:
                 return
             message, odom_base, received = self.latest
+            if not len(self.points) and time.monotonic()-self.first_received < self.p['scan_window']:
+                return
             stamp = (message.header.stamp.sec, message.header.stamp.nanosec)
             if stamp == self.processed_stamp:
                 return
             self.processed_stamp = stamp
             generation, correction, seeded = self.generation, self.correction.copy(), self.seeded
-            points = self.points.copy()
+            # Arrays are replaced, never edited in place; snapshot references
+            # stay valid while callbacks replace the current map.
+            points = self.registration_points
+            history = list(self.history)
+            previous_odom = self.accepted_odom
         try:
-            input_points = filter_points(cloud_xyz(message))
+            frames = []
+            stamp_ns = Time.from_msg(message.header.stamp).nanoseconds
+            inverse_odom = np.linalg.inv(odom_base)
+            for previous,frame_odom,_ in history:
+                difference = (stamp_ns-Time.from_msg(previous.header.stamp).nanoseconds)/1e9
+                if 0 <= difference <= self.p['scan_window']:
+                    xyz = filter_points(cloud_xyz(previous))
+                    # Align scan packets using their own timestamped odometry.
+                    # This is not per-return IMU deskew within a scan packet.
+                    frames.append(transform_points(xyz,inverse_odom@frame_odom))
+            input_points = filter_points(np.vstack(frames))
             source = cloud(input_points, self.p['voxel_size'])
             if len(source.points) < 100:
                 raise ValueError('Too few finite/range-filtered cloud points')
@@ -145,7 +174,7 @@ class Mapper(Node):
                 matched, fitness, rmse = np.eye(4), 1.0, 0.0
             else:
                 nearby = points[np.linalg.norm(points-guess[:3,3],axis=1) < self.p['submap_radius']]
-                result = align(source, cloud(nearby, self.p['voxel_size']), guess,
+                result = align(source, cloud(nearby, None), guess,
                                correspondence=self.p['correspondence_distance'],
                                min_fitness=self.p['min_fitness'], max_rmse=self.p['max_rmse'],
                                max_translation=self.p['max_translation'] if seeded else 2.0,
@@ -153,13 +182,16 @@ class Mapper(Node):
                 if not result.accepted:
                     raise ValueError(f'{result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}')
                 matched, fitness, rmse = result.transform, result.fitness, result.rmse
+            new_correction = matched@np.linalg.inv(odom_base)
+            if not static_correction_is_consistent(correction,new_correction,previous_odom,odom_base):
+                raise ValueError('Rejected GICP correction jump while odometry stationary (limit 0.05m / 2deg)')
             age = (self.get_clock().now()-Time.from_msg(message.header.stamp)).nanoseconds/1e9
             if time.monotonic()-received > self.p['validity_timeout'] or age > self.p['validity_timeout']:
                 raise ValueError('Registration result too old; reduce cloud/submap size or processing load')
             with self.lock:
                 if generation != self.generation:
                     return
-                self.correction = matched @ np.linalg.inv(odom_base)
+                self.correction = new_correction
                 self.seeded = True
                 # Registration stays coarse for ARM CPU cost. Retain original
                 # XYZ at a finer resolution for the 3D map and visual scan.
@@ -175,8 +207,10 @@ class Mapper(Node):
                             raise ValueError('Map point budget reached; save map and begin localization')
                         self.grid.observe(new,matched[:3,3])
                         self.points, self.last_keyframe = combined, matched.copy()
+                        self.registration_points = np.asarray(cloud(combined,self.p['voxel_size']).points).copy()
                         self.last_keyframe_time = now
                 self.last_accepted = received
+                self.accepted_odom = odom_base.copy()
                 transform = TransformStamped()
                 transform.header.stamp = message.header.stamp
                 transform.header.frame_id, transform.child_frame_id = 'map','odom'
@@ -186,8 +220,8 @@ class Mapper(Node):
                 transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z, transform.transform.rotation.w = map(float,q)
                 self.broadcaster.sendTransform(transform)
                 header = Header(stamp=message.header.stamp,frame_id='map')
-                self.registered_pub.publish(point_cloud2.create_cloud_xyz32(header,new.astype(np.float32).tolist()))
-            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)}'))
+                self.registered_pub.publish(xyz_message(header,new))
+            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={len(source.points)}'))
         except Exception as error:
             with self.lock:
                 if generation == self.generation:
@@ -203,10 +237,10 @@ class Mapper(Node):
 
     def publish_map(self):
         with self.lock:
-            points = self.points.copy()
+            points = self.points
         if len(points):
             header = Header(stamp=self.get_clock().now().to_msg(),frame_id='map')
-            self.map_pub.publish(point_cloud2.create_cloud_xyz32(header,points.astype(np.float32).tolist()))
+            self.map_pub.publish(xyz_message(header,points))
 
     def save_map(self, request, response):
         if self.p['mode'] != 'mapping':
