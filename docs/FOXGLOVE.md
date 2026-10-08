@@ -8,13 +8,28 @@
 | 面板 | 设置 |
 |---|---|
 | 3D | 固定参考系 `map`，显示参考系 `map`，先关闭跟随机器人 |
+| 网格上轴 | `Z 向上`，与 ROS 的 XYZ 坐标约定一致 |
 | 实时点云 | 开启 `/point_cloud2`，点大小 2–3 px |
+| GICP 配准点云 | 开启 `/registered_cloud`，坐标已在 `map`，用于观察已通过配准的三维扫描 |
 | 三维地图 | 开启 `/map_cloud`，与实时点云使用不同颜色 |
 | 图像 | `/camera/image/compressed` |
 | 原始消息 | `/localization/status`、`/localization/valid`、`/operator/status` |
 | 导航路径 | `/plan`、`/local_plan`，仅导航模式 |
 | 二维栅格 | `/map`，按需开启透明度，避免遮住三维点云 |
 | 障碍代价地图 | `/local_costmap/costmap`、`/global_costmap/costmap`，按需开启 |
+
+观察稳定的三维场景时，先只开启 `/registered_cloud` 和 `/map_cloud`。
+这两个话题保留 XYZ，颜色字段选 `z`（高度）；它们没有 `intensity` 字段。
+`/registered_cloud` 是实际 GICP 配准结果，只在配准通过时更新；`/map_cloud` 是保存到 PCD 的地图。
+地图点云衰减时间保持 0，避免把每次重复发布的全图叠加。
+实时 `/point_cloud2` 是机身坐标系单帧扫描，衰减时间 0 时显示每帧采样变化；
+在稳定 `odom`/`map` 参考系下可以设置 0.5–1 秒观察扫描覆盖，但显示累积不等同于建图或定位成功。
+
+地图存储分辨率现为 6 厘米，配准仍使用 15 厘米降采样以控制 ARM CPU 消耗。
+即使机器人静止，也会每隔 2 秒加入通过匹配检查的扫描以补充地图覆盖；数据预算仍为 20 万地图点。
+传感器/配准不稳定时先运行只读诊断，并让机器狗静止。
+诊断中的 `z_span` 检查实际高度范围，TF variation 分别显示里程计与 GICP 校正的位姿变化；
+截图无法确定抖动原因，不应靠延长衰减时间掩盖位姿跳动。
 
 定位刚启动但尚未设置初始位姿时，`map → odom` 不存在；可暂时选 `odom` 查看实时点云，
 地图仍在 `map` 下。设置位姿并匹配通过后切回 `map`。不要添加固定的 `map → odom` 来掩盖问题。
@@ -34,7 +49,8 @@ bash go2_3d/tools.sh diagnose
 这会在当前容器中只读采样 12 秒，输出原始与桥接消息数、frame、时间戳、有效 XYZ、
 地图数据及两段 TF。文件通过目录挂载生效，不需要重建镜像或重启建图。
 Foxglove 订阅日志仅证明订阅建立，不证明收到数据。可暂时将固定/显示参考系都设成
-`base_link`，展开“主题”并开启 `/point_cloud2`；建图成功后切回 `map` 并开启 `/map_cloud`。
+`base_link`，展开“主题”并开启 `/point_cloud2` 检查数据接收；建图成功后将固定/显示参考系都切回
+`map` 并开启 `/registered_cloud`、`/map_cloud`，让显示保持在世界坐标系中。
 
 ## 建图与保存
 

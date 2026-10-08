@@ -53,7 +53,8 @@ bash go2_3d/run.sh mapping
 使用你现有的 Foxglove 连接，端口保持 8765。面板和发布操作见
 [Foxglove 操作说明](docs/FOXGLOVE.md)。
 
-- 三维点云：`/point_cloud2`；三维地图：`/map_cloud`；固定参考系 `map`。
+- 原始桥接点云：`/point_cloud2`；GICP 配准点云：`/registered_cloud`；三维地图：`/map_cloud`。
+- 固定/显示参考系均为 `map`，网格 `Z 向上`；配准点云与地图按 `z` 高度着色。
 - 前置相机：`/camera/image/compressed`，替换旧 `/robot0/camera/image_raw`。
 - 发布 `/mapping/save` 保存三维地图和 Nav2 栅格。
 - 设置 `/initialpose`；点选 `/goal_pose` 会转换成 Nav2 `NavigateToPose` action。
@@ -61,6 +62,8 @@ bash go2_3d/run.sh mapping
 - 查看 `/localization/status`、`/localization/valid`、`/operator/status`。
 
 地图保存到仓库目录的 `maps/时间戳/`，`maps/latest` 只在全部保存成功后更新。
+GICP 使用 15 厘米降采样，显示/PCD 地图使用 6 厘米，保留三维高度；
+静止时每隔 2 秒将通过匹配检查的扫描加入地图，补充单帧雷达覆盖。
 地面默认在 `map` 坐标系 `z=-0.30 m`；建图前测量地面并调整
 `go2_3d/gicp.yaml` 的 `floor_z` 和障碍高度切片。栅格只标记观测到的自由空间，
 未观测区域保持未知，三维障碍投影覆盖自由空间；Nav2 不允许穿过未知区域。

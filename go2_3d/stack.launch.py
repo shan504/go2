@@ -17,7 +17,7 @@ def generate_launch_description():
     root = Path('/opt/go2_project')
     config = Path('/runtime/config')
     params = str(config/'nav2_3d.yaml')
-    whitelist = '["^/(tf|tf_static|odom|point_cloud2|map_cloud|map|map_metadata|scan|robot_description|initialpose|goal_pose|plan|local_plan|cmd_vel.*)$","^/camera/image/compressed$","^/(localization|operator|mapping|control|navigation)/.*$","^/(local_costmap|global_costmap)/.*$"]'
+    whitelist = '["^/(tf|tf_static|odom|point_cloud2|registered_cloud|map_cloud|map|map_metadata|scan|robot_description|initialpose|goal_pose|plan|local_plan|cmd_vel.*)$","^/camera/image/compressed$","^/(localization|operator|mapping|control|navigation)/.*$","^/(local_costmap|global_costmap)/.*$"]'
     return LaunchDescription([
         DeclareLaunchArgument('mode',default_value='mapping',choices=['mapping','localization','navigation']),
         DeclareLaunchArgument('camera',default_value='true'),

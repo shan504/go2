@@ -34,7 +34,8 @@ class Mapper(Node):
     def __init__(self):
         super().__init__('go2_gicp')
         defaults = dict(mode='mapping', map_directory='/maps/latest', output_directory='/maps',
-                        voxel_size=0.15, grid_resolution=0.10, floor_z=-0.30,
+                        voxel_size=0.15, map_voxel_size=0.06, keyframe_max_interval=2.0,
+                        grid_resolution=0.10, floor_z=-0.30,
                         obstacle_min_height=0.10, obstacle_max_height=1.5,
                         max_map_points=200000, submap_radius=25.0,
                         registration_period=0.5, validity_timeout=1.0,
@@ -54,6 +55,7 @@ class Mapper(Node):
         self.seeded = False
         self.last_accepted = None
         self.last_keyframe = None
+        self.last_keyframe_time = None
         self.points = np.empty((0,3))
         self.grid = ObservedGrid(self.p['grid_resolution'])
         if self.p['mode'] == 'localization':
@@ -68,6 +70,7 @@ class Mapper(Node):
         retained = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.map_pub = self.create_publisher(PointCloud2, '/map_cloud', retained)
+        self.registered_pub = self.create_publisher(PointCloud2, '/registered_cloud', qos_profile_sensor_data)
         self.valid_pub = self.create_publisher(Bool, '/localization/valid', 1)
         self.status_pub = self.create_publisher(String, '/localization/status', 1)
         self.create_subscription(PointCloud2, '/point_cloud2', self.receive_cloud, qos_profile_sensor_data)
@@ -132,7 +135,8 @@ class Mapper(Node):
             generation, correction, seeded = self.generation, self.correction.copy(), self.seeded
             points = self.points.copy()
         try:
-            source = cloud(filter_points(cloud_xyz(message)), self.p['voxel_size'])
+            input_points = filter_points(cloud_xyz(message))
+            source = cloud(input_points, self.p['voxel_size'])
             if len(source.points) < 100:
                 raise ValueError('Too few finite/range-filtered cloud points')
             guess = correction @ odom_base
@@ -157,15 +161,21 @@ class Mapper(Node):
                     return
                 self.correction = matched @ np.linalg.inv(odom_base)
                 self.seeded = True
+                # Registration stays coarse for ARM CPU cost. Retain original
+                # XYZ at a finer resolution for the 3D map and visual scan.
+                registered = cloud(transform_points(input_points,matched),self.p['map_voxel_size'])
+                new = np.asarray(registered.points)
+                now = time.monotonic()
                 if self.p['mode'] == 'mapping':
                     delta = np.eye(4) if self.last_keyframe is None else np.linalg.inv(self.last_keyframe)@matched
-                    if self.last_keyframe is None or np.linalg.norm(delta[:3,3]) > 0.25 or rotation_angle(delta) > 0.17:
-                        new = transform_points(np.asarray(source.points),matched)
-                        combined = np.asarray(cloud(np.vstack((self.points,new)),self.p['voxel_size']).points).copy()
+                    elapsed = self.last_keyframe_time is None or now-self.last_keyframe_time >= self.p['keyframe_max_interval']
+                    if self.last_keyframe is None or elapsed or np.linalg.norm(delta[:3,3]) > 0.25 or rotation_angle(delta) > 0.17:
+                        combined = np.asarray(cloud(np.vstack((self.points,new)),self.p['map_voxel_size']).points).copy()
                         if len(combined) > self.p['max_map_points']:
                             raise ValueError('Map point budget reached; save map and begin localization')
                         self.grid.observe(new,matched[:3,3])
                         self.points, self.last_keyframe = combined, matched.copy()
+                        self.last_keyframe_time = now
                 self.last_accepted = received
                 transform = TransformStamped()
                 transform.header.stamp = message.header.stamp
@@ -175,6 +185,8 @@ class Mapper(Node):
                 transform.transform.translation.x, transform.transform.translation.y, transform.transform.translation.z = map(float,t)
                 transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z, transform.transform.rotation.w = map(float,q)
                 self.broadcaster.sendTransform(transform)
+                header = Header(stamp=message.header.stamp,frame_id='map')
+                self.registered_pub.publish(point_cloud2.create_cloud_xyz32(header,new.astype(np.float32).tolist()))
             self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)}'))
         except Exception as error:
             with self.lock:
@@ -209,7 +221,7 @@ class Mapper(Node):
         directory = root/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
         try:
             directory.mkdir(parents=True,exist_ok=False)
-            if not o3d.io.write_point_cloud(str(directory/'map.pcd'),cloud(points,self.p['voxel_size']),compressed=True):
+            if not o3d.io.write_point_cloud(str(directory/'map.pcd'),cloud(points,self.p['map_voxel_size']),compressed=True):
                 raise RuntimeError('PCD write failed')
             grid = ObservedGrid(self.p['grid_resolution'])
             grid.free = free

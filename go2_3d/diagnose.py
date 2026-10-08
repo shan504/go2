@@ -11,19 +11,21 @@ from sensor_msgs.msg import PointCloud2, CompressedImage
 from std_msgs.msg import String, Bool
 from tf2_ros import Buffer, TransformListener, TransformException
 from geometry import cloud_xyz
+from geometry import pose_matrix, rotation_angle
 
 
 class Diagnostics(Node):
     def __init__(self):
         super().__init__('go2_3d_readonly_diagnostics')
         self.latest, self.counts, self.received = {}, {}, {}
+        self.tf_samples = {('odom','base_link'):[], ('map','odom'):[]}
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer,self)
         self.retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
                                    durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.types = {
             '/utlidar/cloud_base':PointCloud2,'/utlidar/robot_odom':Odometry,
-            '/point_cloud2':PointCloud2,'/odom':Odometry,'/map_cloud':PointCloud2,
+            '/point_cloud2':PointCloud2,'/registered_cloud':PointCloud2,'/odom':Odometry,'/map_cloud':PointCloud2,
             '/camera/image/compressed':CompressedImage,
             '/localization/status':String,'/localization/valid':Bool,
         }
@@ -34,6 +36,21 @@ class Diagnostics(Node):
                 self.received[topic] = time.monotonic()
             self.create_subscription(kind,topic,receive,
                                      self.retained if topic == '/map_cloud' else qos_profile_sensor_data)
+        self.create_timer(0.05,self.sample_tf)
+
+    def sample_tf(self):
+        for (parent,child),samples in self.tf_samples.items():
+            try:
+                tf = self.buffer.lookup_transform(parent,child,Time())
+                stamp = tf.header.stamp.sec*1_000_000_000+tf.header.stamp.nanosec
+                if samples and samples[-1][0] == stamp:
+                    continue
+                t,q = tf.transform.translation,tf.transform.rotation
+                matrix = pose_matrix([t.x,t.y,t.z],[q.x,q.y,q.z,q.w])
+                samples.append((stamp,matrix))
+                del samples[:-500]
+            except (TransformException,ValueError):
+                pass
 
     def summary(self):
         lines = ['READ-ONLY 3D diagnostics (raw timestamps are not host timestamps)',
@@ -62,6 +79,7 @@ class Diagnostics(Node):
                     prefix += f' finite_xyz={len(points)}'
                     if len(points):
                         prefix += f' xyz_min={np.round(points.min(axis=0),2).tolist()} xyz_max={np.round(points.max(axis=0),2).tolist()}'
+                        prefix += f' z_span={np.ptp(points[:,2]):.3f}m'
                 except Exception as error:
                     prefix += f' XYZ_DECODE_ERROR={error}'
             lines.append(prefix)
@@ -77,6 +95,13 @@ class Diagnostics(Node):
                 lines.append(f'TF {parent} -> {child}: OK host_age={now/1e9-stamp:.3f}s')
             except TransformException as error:
                 lines.append(f'TF {parent} -> {child}: MISSING {error}')
+            samples = self.tf_samples[(parent,child)]
+            if len(samples)>1:
+                positions = np.array([m[:3,3] for _,m in samples])
+                changes = [np.linalg.inv(a)@b for (_,a),(_,b) in zip(samples,samples[1:])]
+                displacement = max(np.linalg.norm(m[:3,3]) for m in changes)
+                angle = np.degrees(max(rotation_angle(m) for m in changes))
+                lines.append(f'TF {parent} -> {child} variation: samples={len(samples)} position_span={np.round(np.ptp(positions,axis=0),4).tolist()}m max_step={displacement:.4f}m max_rotation_step={angle:.3f}deg')
         if '/point_cloud2' in self.latest:
             try:
                 self.buffer.lookup_transform('odom','base_link',Time.from_msg(self.latest['/point_cloud2'].header.stamp))

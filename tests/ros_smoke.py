@@ -17,7 +17,7 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header, Bool, Empty, String
 from tf2_ros import TransformBroadcaster,Buffer,TransformListener,TransformException
 from mapper import Mapper,transform_matrix
-from geometry import pose_matrix,quaternion_from_matrix,transform_points
+from geometry import pose_matrix,quaternion_from_matrix,transform_points,cloud_xyz
 from test_3d import room
 # stdlib has an operator module; load our node without shadowing it.
 import importlib.util
@@ -46,8 +46,10 @@ class Sensors(Node):
         self.save = self.create_publisher(Empty,'/mapping/save',1)
         self.valid = None
         self.operator_status = ''
+        self.registered = None
         self.create_subscription(Bool,'/localization/valid',lambda m: setattr(self,'valid',m.data),1)
         self.create_subscription(String,'/operator/status',lambda m: setattr(self,'operator_status',m.data),1)
+        self.create_subscription(PointCloud2,'/registered_cloud',lambda m: setattr(self,'registered',m),qos_profile_sensor_data)
         self.points = room()
         self.truth, self.odom = np.eye(4),np.eye(4)
         self.stop = threading.Event()
@@ -79,6 +81,8 @@ def phase(directory,mode):
     rclpy.init(args=['--ros-args','-p',f'mode:={mode}','-p',f'output_directory:={directory}',
                      '-p',f'map_directory:={directory}/latest'])
     mapper,operator,sensors = Mapper(),operator_module.Operator(),Sensors()
+    if mode == 'mapping':
+        sensors.points = room()[::2]
     executor = MultiThreadedExecutor(num_threads=5)
     for node in (mapper,operator,sensors):
         executor.add_node(node)
@@ -88,6 +92,15 @@ def phase(directory,mode):
     try:
         if mode == 'mapping':
             wait_for(lambda: len(mapper.points)>100)
+            initial_count = len(mapper.points)
+            # A stationary nonrepeating scan must enrich the actual saved map,
+            # rather than relying on Foxglove's display decay/accumulation.
+            sensors.points = room()
+            wait_for(lambda: len(mapper.points)>initial_count*1.3)
+            wait_for(lambda: sensors.registered is not None)
+            assert sensors.registered.header.frame_id == 'map'
+            assert np.ptp(cloud_xyz(sensors.registered)[:,2])>2.0,'Registered scan lost 3D height'
+            assert np.ptp(mapper.points[:,2])>2.0,'Map lost 3D height'
             truth = pose_matrix([0.40,0.0,0.0],[0,0,0,1])
             odom = pose_matrix([0.48,0.03,0.0],[0,0,0,1])
             sensors.truth,sensors.odom = truth,odom
@@ -97,8 +110,11 @@ def phase(directory,mode):
             wait_for(lambda: 'Save success=True' in sensors.operator_status)
             for name in ('map.pcd','nav.yaml','nav.pgm','metadata.yaml'):
                 assert (Path(directory)/'latest'/name).is_file(),name
+            import open3d as o3d
+            saved = o3d.io.read_point_cloud(str(Path(directory)/'latest/map.pcd'))
+            assert len(saved.points)>initial_count*1.3,'PCD was coarsened back to registration resolution'
             assert sensors.valid is False,'Mapping must never enable navigation motion'
-            print('PASS ROS mapping: accepted GICP TF + Foxglove save -> PCD and Nav2 grid')
+            print('PASS ROS mapping: stationary 3D enrichment + map-frame registered scan + GICP TF + dense PCD and Nav2 grid')
         else:
             wait_for(lambda: sensors.valid is False and mapper.latest is not None)
             assert not mapper.initialized,'Localization must wait for initialpose'
