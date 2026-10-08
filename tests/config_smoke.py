@@ -21,6 +21,14 @@ for name in ('local_costmap','global_costmap'):
     assert cfg['global_frame'] == ('map' if name == 'global_costmap' else 'odom')
     assert cfg['obstacle_layer']['scan']['topic'] == '/scan'
     assert 'voxel_layer' not in cfg['plugins']
+    assert cfg['inflation_layer']['inflation_radius'] == 0.35
+    assert cfg['inflation_layer']['cost_scaling_factor'] == 8.0
+    assert cfg['footprint'] == '[[-0.40,-0.22],[-0.40,0.22],[0.40,0.22],[0.40,-0.22]]'
+    assert cfg['footprint_padding'] == 0.01
+    assert cfg['always_send_full_costmap'] is True
+local = params['local_costmap']['local_costmap']['ros__parameters']
+assert local['width'] == local['height'] == 4
+assert local['resolution'] == 0.05 and local['rolling_window'] is True
 assert params['planner_server']['ros__parameters']['GridBased']['allow_unknown'] is False
 urdf = ET.parse('/runtime/config/go2_edu.urdf').getroot()
 assert not {'map','odom'} & {link.get('name') for link in urdf.findall('link')}

@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Read-only Nav2 grid/TF diagnostics; never sends a goal or motion request."""
+import argparse
+from collections import deque
+import math
+from pathlib import Path
+import time
+
+import numpy as np
+import yaml
+import rclpy
+from rclpy.node import Node
+from rclpy.time import Time
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profile_sensor_data
+from nav_msgs.msg import OccupancyGrid
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool, String
+from tf2_ros import Buffer, TransformListener, TransformException
+from geometry import pose_matrix
+
+
+def cell(grid, xy):
+    """World coordinate to cell, including a rotated grid origin."""
+    p, q = grid.info.origin.position, grid.info.origin.orientation
+    origin = pose_matrix([p.x,p.y,p.z],[q.x,q.y,q.z,q.w])
+    local = np.linalg.inv(origin) @ [xy[0],xy[1],p.z,1.0]
+    x,y = np.floor(local[:2]/grid.info.resolution).astype(int)
+    return (int(x),int(y)) if 0 <= x < grid.info.width and 0 <= y < grid.info.height else None
+
+
+def label(value):
+    if value == -1:
+        return 'unknown (blocked by allow_unknown=false)'
+    if value >= 99:
+        return 'inscribed/lethal (blocked)'
+    return 'free' if value == 0 else 'graded inflation cost'
+
+
+def connected(data, start, goal):
+    """Cell-center connectivity only, not a footprint-aware Nav2 plan."""
+    if start is None or goal is None:
+        return 'outside grid'
+    if data.size > 500_000:
+        return 'not checked: grid exceeds 500000 cells'
+    if not 0 <= data[goal[1],goal[0]] < 99:
+        return 'NO: goal cell blocked'
+    visited = np.zeros(data.shape,dtype=bool)
+    visited[start[1],start[0]] = True
+    pending = deque([start])
+    while pending:
+        x,y = pending.popleft()
+        if (x,y) == goal:
+            return 'YES (cell centers only; not a Nav2 plan)'
+        for nx,ny in ((x-1,y),(x+1,y),(x,y-1),(x,y+1)):
+            if (0 <= nx < data.shape[1] and 0 <= ny < data.shape[0]
+                    and not visited[ny,nx] and 0 <= data[ny,nx] < 99):
+                visited[ny,nx] = True
+                pending.append((nx,ny))
+    return 'NO: disconnected at cell-center level'
+
+
+class NavCheck(Node):
+    def __init__(self, goal):
+        super().__init__('go2_nav_readonly_check')
+        self.goal, self.latest, self.received = goal, {}, {}
+        self.buffer = Buffer()
+        self.listener = TransformListener(self.buffer,self)
+        retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
+                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        kinds = {'/map':OccupancyGrid,'/global_costmap/costmap':OccupancyGrid,
+                 '/local_costmap/costmap':OccupancyGrid,'/scan':LaserScan,
+                 '/localization/valid':Bool,'/localization/status':String,
+                 '/operator/status':String}
+        for topic,kind in kinds.items():
+            def receive(msg,topic=topic):
+                self.latest[topic], self.received[topic] = msg,time.monotonic()
+            self.create_subscription(kind,topic,receive,
+                                     retained if kind is OccupancyGrid else qos_profile_sensor_data)
+
+    def summary(self):
+        lines = ['READ-ONLY Nav2 check; no goal, parameter or motion writes',
+                 f'Goal in map: {self.goal}']
+        config_path = Path('/runtime/config/nav2_3d.yaml')
+        if config_path.exists():
+            config = yaml.safe_load(config_path.read_text())
+            for name in ('global_costmap','local_costmap'):
+                p = config[name][name]['ros__parameters']
+                lines.append(f'{name} generated config: frame={p["global_frame"]} '
+                             f'initial_size={p.get("width")}x{p.get("height")}m resolution={p["resolution"]} '
+                             f'inflation={p["inflation_layer"]} footprint={p["footprint"]} '
+                             f'padding={p.get("footprint_padding")}')
+            lines.append('Global StaticLayer resizes to the saved map; actual grid dimensions follow below.')
+        for topic in ('/localization/valid','/localization/status','/operator/status'):
+            msg = self.latest.get(topic)
+            age = time.monotonic()-self.received[topic] if msg else math.inf
+            lines.append(f'{topic}: {msg.data if msg else "NO MESSAGES"} receipt_age={age:.2f}s')
+        try:
+            tf = self.buffer.lookup_transform('map','base_link',Time())
+            t,q = tf.transform.translation,tf.transform.rotation
+            yaw = math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+            lines.append(f'Robot in map: xyz={[round(t.x,3),round(t.y,3),round(t.z,3)]} yaw={math.degrees(yaw):.1f}deg')
+        except TransformException as error:
+            lines.append(f'TF map -> base_link: MISSING; initialize GICP first. {error}')
+        for topic in ('/map','/global_costmap/costmap','/local_costmap/costmap'):
+            grid = self.latest.get(topic)
+            if grid is None:
+                lines.append(f'{topic}: NO MESSAGES; publishers={self.count_publishers(topic)}')
+                continue
+            width,height = grid.info.width,grid.info.height
+            if not width or not height or len(grid.data) != width*height:
+                lines.append(f'{topic}: invalid or empty grid')
+                continue
+            data = np.asarray(grid.data).reshape(height,width)
+            lines.append(f'{topic}: frame={grid.header.frame_id!r} cells={width}x{height} '
+                         f'resolution={grid.info.resolution:.3f}m '
+                         f'receipt_age={time.monotonic()-self.received[topic]:.2f}s '
+                         f'free={np.count_nonzero(data==0)} unknown={np.count_nonzero(data==-1)} '
+                         f'graded={np.count_nonzero((data>0)&(data<99))} '
+                         f'inscribed/lethal={np.count_nonzero(data>=99)}')
+            try:
+                tf = self.buffer.lookup_transform(grid.header.frame_id,'base_link',Time())
+                t = tf.transform.translation
+                start = cell(grid,(t.x,t.y))
+                if grid.header.frame_id == 'map':
+                    target = cell(grid,self.goal)
+                else:
+                    tf = self.buffer.lookup_transform(grid.header.frame_id,'map',Time())
+                    t,q = tf.transform.translation,tf.transform.rotation
+                    matrix = pose_matrix([t.x,t.y,t.z],[q.x,q.y,q.z,q.w])
+                    target = cell(grid,(matrix @ [*self.goal,0.0,1.0])[:2])
+                for name,index in (('robot',start),('goal',target)):
+                    value = int(data[index[1],index[0]]) if index else None
+                    lines.append(f'  {name} cell={index} value={value}: {label(value) if value is not None else "outside grid"}')
+                lines.append('  connectivity: '+connected(data,start,target))
+            except (TransformException,ValueError) as error:
+                lines.append(f'  cell checks unavailable: {error}')
+        scan = self.latest.get('/scan')
+        if scan:
+            ranges = np.asarray(scan.ranges)
+            ranges = ranges[np.isfinite(ranges)&(ranges>=scan.range_min)&(ranges<=scan.range_max)]
+            lines.append(f'/scan: frame={scan.header.frame_id!r} finite_returns={len(ranges)} '
+                         f'min={float(ranges.min()) if len(ranges) else "none"}m '
+                         f'returns_under_0.6m={np.count_nonzero(ranges<0.6)}')
+        return '\n'.join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('x',type=float)
+    parser.add_argument('y',type=float)
+    args = parser.parse_args()
+    if not math.isfinite(args.x) or not math.isfinite(args.y):
+        parser.error('goal coordinates must be finite')
+    rclpy.init(args=[])
+    node = NavCheck((args.x,args.y))
+    try:
+        deadline = time.monotonic()+8
+        while time.monotonic() < deadline:
+            rclpy.spin_once(node,timeout_sec=0.2)
+        print(node.summary(),flush=True)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
