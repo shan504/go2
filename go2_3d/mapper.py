@@ -21,7 +21,7 @@ from sensor_msgs.msg import PointCloud2
 from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
 from tf2_ros import Buffer, TransformListener, TransformBroadcaster, TransformException
 from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
-                      cloud_xyz, filter_points, rotation_angle, ObservedGrid)
+                      cloud_xyz, filter_points, rotation_angle, ObservedGrid, planar_pose, first_map_pose)
 from registration import cloud, align, static_correction_is_consistent, blend_correction
 from ros_cloud import xyz_message
 from ground import estimate_ground
@@ -68,6 +68,7 @@ class Mapper(Node):
         self.last_tf_stamp = None
         self.initial_hint_used = False
         self.waiting_status_time = 0.0
+        self.last_failure = ''
         self.last_keyframe = None
         self.last_keyframe_time = None
         self.points = np.empty((0,3))
@@ -197,8 +198,10 @@ class Mapper(Node):
                 raise ValueError('Too few finite/range-filtered cloud points')
             guess = correction @ odom_base
             if not len(points) and self.p['mode'] == 'mapping':
-                # First body pose is the map origin, with floor_z relative to it.
-                matched, fitness, rmse = np.eye(4), 1.0, 0.0
+                # Zero first position/heading, but preserve the odometry Z
+                # direction. Identity here had baked initial body roll/pitch
+                # into the entire map and its ground/costmap projection.
+                matched, fitness, rmse = first_map_pose(odom_base), 1.0, 0.0
             elif self.p['mode'] == 'mapping' or not seeded:
                 nearby = points[np.linalg.norm(points-guess[:3,3],axis=1) < self.p['submap_radius']]
                 result = align(source, cloud(nearby, None), guess,
@@ -264,6 +267,7 @@ class Mapper(Node):
                         self.registration_points = np.asarray(cloud(combined,self.p['voxel_size']).points).copy()
                         self.last_keyframe_time = now
                 self.last_accepted = received
+                self.last_failure = ''
                 self.accepted_odom = odom_base.copy()
                 header = Header(stamp=message.header.stamp,frame_id='map')
                 self.registered_pub.publish(xyz_message(header,new))
@@ -272,6 +276,7 @@ class Mapper(Node):
             with self.lock:
                 if generation == self.generation:
                     self.last_accepted = None
+                    self.last_failure = str(error)
             self.get_logger().warning(str(error), throttle_duration_sec=2.0)
             self.status_pub.publish(String(data=str(error)))
 
@@ -283,6 +288,11 @@ class Mapper(Node):
                 text = ('Waiting for fresh cloud and timestamped odometry' if self.latest is None else
                         'Waiting for actual initial map pose; Nav2 startup deferred')
                 self.status_pub.publish(String(data=text))
+                self.waiting_status_time = time.monotonic()
+            elif self.p['mode']=='localization' and not valid and time.monotonic()-self.waiting_status_time>2:
+                cloud_age = time.monotonic()-self.latest[2] if self.latest else float('inf')
+                accepted_age = time.monotonic()-self.last_accepted if self.last_accepted else float('inf')
+                self.status_pub.publish(String(data=f'Localization invalid: {self.last_failure or "waiting for a fresh accepted GICP match"}; cloud_age={cloud_age:.2f}s accepted_age={accepted_age:.2f}s'))
                 self.waiting_status_time = time.monotonic()
         self.valid_pub.publish(Bool(data=valid))
 
@@ -307,7 +317,17 @@ class Mapper(Node):
             t,q = self.correction[:3,3],quaternion_from_matrix(self.correction)
             transform.transform.translation.x,transform.transform.translation.y,transform.transform.translation.z = map(float,t)
             transform.transform.rotation.x,transform.transform.rotation.y,transform.transform.rotation.z,transform.transform.rotation.w = map(float,q)
-            self.broadcaster.sendTransform(transform)
+            # Keep true 6D body/point-cloud poses. Nav2 gets a separate 2D
+            # footprint on the map grid, with measured XY and yaw preserved.
+            body = self.correction@transform_matrix(odom.transform)
+            body_footprint = np.linalg.inv(body)@planar_pose(body)
+            footprint = TransformStamped()
+            footprint.header.stamp = odom.header.stamp
+            footprint.header.frame_id,footprint.child_frame_id = 'base_link','base_footprint'
+            t,q = body_footprint[:3,3],quaternion_from_matrix(body_footprint)
+            footprint.transform.translation.x,footprint.transform.translation.y,footprint.transform.translation.z = map(float,t)
+            footprint.transform.rotation.x,footprint.transform.rotation.y,footprint.transform.rotation.z,footprint.transform.rotation.w = map(float,q)
+            self.broadcaster.sendTransform([transform,footprint])
             self.last_tf_stamp = stamp.nanoseconds
 
     def publish_map(self):

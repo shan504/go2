@@ -9,7 +9,7 @@ import yaml
 import open3d as o3d
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
 from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
-                      cloud_xyz, filter_points, ObservedGrid)
+                      cloud_xyz, filter_points, ObservedGrid, planar_pose, first_map_pose)
 from registration import cloud, align, static_correction_is_consistent, blend_correction
 
 
@@ -25,6 +25,25 @@ def room():
 
 
 class GeometryTests(unittest.TestCase):
+    def test_first_mapping_pose_keeps_odometry_vertical(self):
+        body = pose_matrix([2,-3,0.4],[0.1,-0.06,0.23,0.93])
+        first = first_map_pose(body)
+        correction = first@np.linalg.inv(body)
+        np.testing.assert_allclose(first[:3,3],[0,0,0],atol=1e-9)
+        np.testing.assert_allclose(correction[:3,:3]@[0,0,1],[0,0,1],atol=1e-9)
+        self.assertAlmostEqual(math.atan2(first[1,0],first[0,0]),0.0,places=9)
+        self.assertGreater(abs(first[2,0])+abs(first[2,1]),0.05,'True body roll/pitch was erased')
+
+    def test_planar_footprint_preserves_heading_without_body_tilt(self):
+        body = pose_matrix([0.7,-1.2,0.15],[0.12,-0.08,0.24,0.9])
+        projected = planar_pose(body)
+        relative = np.linalg.inv(body)@projected
+        np.testing.assert_allclose(body@relative,projected,atol=1e-9)
+        np.testing.assert_allclose(projected[:2,3],body[:2,3],atol=1e-9)
+        np.testing.assert_allclose(projected[2],[0,0,1,0],atol=1e-9)
+        self.assertAlmostEqual(math.atan2(projected[1,0],projected[0,0]),
+                               math.atan2(body[1,0],body[0,0]),places=9)
+
     def test_se3_roundtrip_and_map_odom_composition(self):
         for angle in (0.0,0.7,math.pi-1e-7):
             map_base = pose_matrix([1,2,0.2],[0,0,math.sin(angle/2),math.cos(angle/2)])

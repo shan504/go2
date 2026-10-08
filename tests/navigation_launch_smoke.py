@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchContext, LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
+from launch_ros.actions import SetRemap
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 
@@ -31,11 +32,15 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
         for action in description.entities:
             if isinstance(action, DeclareLaunchArgument):
                 action.execute(context)
-        include = next(action for action in description.entities
+        group = next(action for action in description.entities if isinstance(action,GroupAction))
+        assert group.condition.evaluate(context) == (mode == 'navigation')
+        include = next(action for action in group.get_sub_entities()
                        if isinstance(action, IncludeLaunchDescription)
                        and isinstance(action.launch_description_source, PythonLaunchDescriptionSource))
-        assert include.condition.evaluate(context) == (mode == 'navigation')
         if mode == 'navigation':
+            remap = next(action for action in group.get_sub_entities() if isinstance(action,SetRemap))
+            remap.execute(context)
+            assert ('goal_pose','/navigation/nav2_direct_goal_unused') in context.launch_configurations['ros_remaps']
             included = include.execute(context)
             for action in included:
                 if not isinstance(action, LaunchDescription):

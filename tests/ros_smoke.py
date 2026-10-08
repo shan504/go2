@@ -17,7 +17,7 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header, Bool, Empty, String
 from tf2_ros import TransformBroadcaster,Buffer,TransformListener,TransformException
 from mapper import Mapper,transform_matrix
-from geometry import pose_matrix,quaternion_from_matrix,transform_points,cloud_xyz
+from geometry import pose_matrix,quaternion_from_matrix,transform_points,cloud_xyz,planar_pose
 from test_3d import room
 # stdlib has an operator module; load our node without shadowing it.
 import importlib.util
@@ -93,6 +93,8 @@ def phase(directory,mode,dense=False,auto=False):
     mapper,operator,sensors = Mapper(),operator_module.Operator(),Sensors()
     if mode == 'mapping':
         sensors.points = room()[::2]
+        if dense:
+            sensors.truth = sensors.odom = pose_matrix([0,0,0],[np.sin(0.12/2),0,0,np.cos(0.12/2)])
     executor = MultiThreadedExecutor(num_threads=5)
     for node in (mapper,operator,sensors):
         executor.add_node(node)
@@ -132,6 +134,11 @@ def phase(directory,mode,dense=False,auto=False):
             saved = o3d.io.read_point_cloud(str(Path(directory)/'latest/map.pcd'))
             assert len(saved.points)>initial_count*1.3,'PCD was coarsened back to registration resolution'
             assert sensors.valid is False,'Mapping must never enable navigation motion'
+            if dense:
+                import yaml
+                metadata = yaml.safe_load((Path(directory)/'latest/metadata.yaml').read_text())
+                np.testing.assert_allclose(metadata['ground_model']['plane'][:3],[0,0,1],atol=0.02,
+                                           err_msg='Initial body roll tilted the saved floor')
             print('PASS ROS mapping: stationary 3D enrichment + map-frame registered scan + GICP TF + dense PCD and Nav2 grid')
         else:
             if not auto:
@@ -149,6 +156,25 @@ def phase(directory,mode,dense=False,auto=False):
                 assert mapper.initial_hint_used,'Numerical startup pose was not used'
             wait_for(lambda: 'fine=True' in sensors.localization_status)
             wait_for(lambda: sensors.correction_matches(np.eye(4)))
+            wait_for(lambda: sensors.buffer.can_transform('map','base_footprint',Time()))
+            footprint = transform_matrix(sensors.buffer.lookup_transform('map','base_footprint',Time()).transform)
+            np.testing.assert_allclose(footprint,planar_pose(sensors.odom),atol=0.04)
+            # Roll/pitch and standing height belong to the 3D body. A Nav2
+            # footprint must stay on the grid without erasing measured yaw.
+            tilted = pose_matrix([0.0,0.0,0.04],[0.10,-0.04,0.055,0.99])
+            sensors.truth,sensors.odom = tilted,tilted
+            def footprint_matches():
+                try:
+                    actual = transform_matrix(sensors.buffer.lookup_transform('map','base_footprint',Time()).transform)
+                    body = transform_matrix(sensors.buffer.lookup_transform('map','base_link',Time()).transform)
+                    return (np.allclose(actual,planar_pose(tilted),atol=0.04) and
+                            np.allclose(body,tilted,atol=0.04))
+                except TransformException:
+                    return False
+            wait_for(footprint_matches)
+            sensors.truth,sensors.odom = np.eye(4),np.eye(4)
+            wait_for(lambda: sensors.correction_matches(np.eye(4)) and
+                     np.allclose(mapper.accepted_odom,np.eye(4),atol=0.01))
             # Nav2 must get timestamped TF between GICP updates. Keep live
             # odometry while briefly pausing registration, then check that
             # the held accepted correction advances without future stamps.

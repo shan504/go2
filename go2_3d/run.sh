@@ -50,6 +50,7 @@ if sudo docker container inspect go2-sdk >/dev/null 2>&1; then
 fi
 echo "Starting $mode ($profile); motion disabled. View registered_cloud, map_cloud and camera/image/compressed."
 sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --network host \
+  -e OMP_NUM_THREADS=2 -e OPENBLAS_NUM_THREADS=1 \
   -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -e CYCLONEDDS_URI=file:///etc/cyclonedds.xml \
   -v "$dds_file:/etc/cyclonedds.xml:ro" \

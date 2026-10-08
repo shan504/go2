@@ -198,7 +198,11 @@ ros2 lifecycle get /planner_server
 - 首次选近距离目标，观察 `/plan`、局部障碍和机器人响应。
 
 新增的 `operator_bridge.py` 把 `/goal_pose` 转换为 `/navigate_to_pose` action。
+Nav2 原生的 `/goal_pose` 订阅在启动组内重映射，避免绕过操作节点或重复发 action。
 `/operator/status` 应显示 Nav2 接受目标；定位无效、非导航模式或目标参考系错误时会拒绝。
+原始地图目标值 100、代价地图目标值 99/100、未知目标和过期代价地图也会明确拒绝，
+信息包含话题、格子和数值。地图中固定目标归一化为最新时间语义和 yaw 姿态。
+规划失败不再自动执行原地 Spin 或 BackUp，避免把恢复动作误认为目标导航。
 有进行中的目标时先取消，等待 action 完成，再选新目标。
 
 “启用运动”只是允许运动桥执行 Nav2 的速度命令，不会自己产生前进命令。
@@ -215,6 +219,26 @@ Ctrl+C 后的 ROS context invalid 错误属于关闭阶段，不能据此判断�
 修复保留原始 PCD 和旧目录，新版导航要求已有地面模型。新建地图保存时自动生成模型。
 实时 `/navigation/obstacle_cloud` 使用同一地面模型及点云采集时间的 TF；未知角度不当作无障碍远距离射线清除。
 三维 PCD 自身的漂移或重影不属于这个投影修复范围。
+
+全局 Nav2 轮廓使用动态 `base_footprint`，按真实 map 位姿投影到栅格 XY 平面，
+不再通过 URDF 固定关节跟随机身 roll/pitch。yaw 保持实际读数，不强行与地图边缘平行。
+局部栅格仍使用 odom；如果 map/odom 本身有真实三维倾斜，两张栅格显示仍可能不完全共面。
+新建图已改为保留里程计 Z 轴；旧 PCD 不会因此自动旋转或重建。
+
+请导出实际地图供离线检查，而不是反复更改膨胀半径：
+
+```bash
+cd ~/go2_nav
+bash go2_3d/tools.sh export-map
+```
+
+在 Windows PowerShell 下载生成的文件：
+
+```powershell
+scp unitree@192.168.123.18:/home/unitree/go2_nav/runtime/go2-map-debug.zip "$env:USERPROFILE\Downloads\go2-map-debug.zip"
+```
+
+包中包含当前 `map.pcd`、PGM、YAML、地面模型、生成配置和最近容器日志；地图和机器人状态不变。
 
 局部代价地图是跟随机器狗的 `4 × 4 米` 窗口，分辨率 5 厘米；全局代价地图与
 保存的二维地图范围一致。两者膨胀半径为 28 厘米、衰减系数为 12，外形仍为

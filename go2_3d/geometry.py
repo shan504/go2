@@ -40,6 +40,29 @@ def transform_points(points, matrix):
     return np.asarray(points) @ matrix[:3, :3].T + matrix[:3, 3]
 
 
+def planar_pose(matrix):
+    """Project a measured body pose onto the navigation grid's map XY plane."""
+    yaw = math.atan2(matrix[1, 0], matrix[0, 0])
+    return pose_matrix([matrix[0, 3], matrix[1, 3], 0.0],
+                       [0.0, 0.0, math.sin(yaw/2), math.cos(yaw/2)])
+
+
+def first_map_pose(odom_body):
+    """Put first body position/heading at zero without tilting the odom Z axis."""
+    pose = np.eye(4)
+    pose[:3,:3] = planar_pose(odom_body)[:3,:3].T@odom_body[:3,:3]
+    return pose
+
+
+def grid_cell(grid, xy):
+    """Convert an XY position in the grid frame, including rotated origins."""
+    p, q = grid.info.origin.position, grid.info.origin.orientation
+    origin = pose_matrix([p.x, p.y, p.z], [q.x, q.y, q.z, q.w])
+    local = np.linalg.inv(origin) @ [xy[0], xy[1], p.z, 1.0]
+    x, y = np.floor(local[:2]/grid.info.resolution).astype(int)
+    return (int(x), int(y)) if 0 <= x < grid.info.width and 0 <= y < grid.info.height else None
+
+
 def rotation_angle(matrix):
     return math.acos(float(np.clip((np.trace(matrix[:3, :3])-1)/2, -1, 1)))
 

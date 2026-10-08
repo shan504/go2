@@ -16,17 +16,13 @@ from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener, TransformException
-from geometry import pose_matrix, cloud_xyz, transform_points
+from geometry import pose_matrix, cloud_xyz, transform_points, grid_cell
 from ground import heights
 
 
 def cell(grid, xy):
     """World coordinate to cell, including a rotated grid origin."""
-    p, q = grid.info.origin.position, grid.info.origin.orientation
-    origin = pose_matrix([p.x,p.y,p.z],[q.x,q.y,q.z,q.w])
-    local = np.linalg.inv(origin) @ [xy[0],xy[1],p.z,1.0]
-    x,y = np.floor(local[:2]/grid.info.resolution).astype(int)
-    return (int(x),int(y)) if 0 <= x < grid.info.width and 0 <= y < grid.info.height else None
+    return grid_cell(grid,xy)
 
 
 def label(value):
@@ -77,7 +73,7 @@ class NavCheck(Node):
             def receive(msg,topic=topic):
                 self.latest[topic], self.received[topic] = msg,time.monotonic()
             self.create_subscription(kind,topic,receive,
-                                     retained if kind is OccupancyGrid else qos_profile_sensor_data)
+                                     retained if kind is OccupancyGrid or topic == '/operator/status' else qos_profile_sensor_data)
 
     def summary(self):
         lines = ['READ-ONLY Nav2 check; no goal, parameter or motion writes',

@@ -2,11 +2,12 @@
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch_ros.actions import SetRemap
 from launch_ros.parameter_descriptions import ParameterValue
 
 
@@ -61,9 +62,14 @@ def generate_launch_description():
              condition=navigation,parameters=[params,{'yaml_filename':'/maps/latest/nav.yaml','use_sim_time':False}]),
         Node(package='nav2_lifecycle_manager',executable='lifecycle_manager',name='lifecycle_manager_map',
              condition=navigation,parameters=[{'autostart':True,'node_names':['map_server'],'use_sim_time':False}]),
-        IncludeLaunchDescription(PythonLaunchDescriptionSource(str(Path(get_package_share_directory('nav2_bringup'))/'launch/navigation_launch.py')),
-             condition=navigation,launch_arguments={'params_file':params,'use_sim_time':'false',
+        # Humble's bt_navigator subscribes to goal_pose and forwards it directly
+        # to its action. Isolate this shortcut so only Operator handles clicks.
+        GroupAction(condition=navigation,actions=[
+          SetRemap(src='goal_pose',dst='/navigation/nav2_direct_goal_unused'),
+          IncludeLaunchDescription(PythonLaunchDescriptionSource(str(Path(get_package_share_directory('nav2_bringup'))/'launch/navigation_launch.py')),
+             launch_arguments={'params_file':params,'use_sim_time':'false',
                                                    # Humble evaluates this inside PythonExpression(['not ', ...]).
                                                    'autostart':'false','use_composition':'False'}.items()),
+        ]),
         IncludeLaunchDescription(FrontendLaunchDescriptionSource(str(Path(get_package_share_directory('foxglove_bridge'))/'launch/foxglove_bridge_launch.xml'))),
     ])

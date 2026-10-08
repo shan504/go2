@@ -19,7 +19,7 @@ from tf2_ros import TransformBroadcaster
 from nav2_ready import Nav2Ready
 from obstacle_cloud import ObstacleCloud
 from ros_cloud import xyz_message
-from geometry import cloud_xyz,pose_matrix,transform_points,quaternion_from_matrix
+from geometry import cloud_xyz,pose_matrix,transform_points,quaternion_from_matrix,planar_pose
 
 
 def wait(predicate,seconds=8):
@@ -59,7 +59,13 @@ with tempfile.TemporaryDirectory() as tmp:
             tf = TransformStamped(header=Header(stamp=stamp,frame_id='map'),child_frame_id='base_link')
             q = quaternion_from_matrix(matrix)
             tf.transform.rotation.x,tf.transform.rotation.y,tf.transform.rotation.z,tf.transform.rotation.w = map(float,q)
-            broadcaster.sendTransform(tf)
+            projected = planar_pose(matrix)
+            footprint = TransformStamped(header=Header(stamp=stamp,frame_id='base_link'),child_frame_id='base_footprint')
+            relative = np.linalg.inv(matrix)@projected
+            t,q = relative[:3,3],quaternion_from_matrix(relative)
+            footprint.transform.translation.x,footprint.transform.translation.y,footprint.transform.translation.z = map(float,t)
+            footprint.transform.rotation.x,footprint.transform.rotation.y,footprint.transform.rotation.z,footprint.transform.rotation.w = map(float,q)
+            broadcaster.sendTransform([tf,footprint])
         cloud.publish(xyz_message(Header(stamp=stamp,frame_id='base_link'),body_points))
     source.create_timer(0.05,emit)
     executor = MultiThreadedExecutor(num_threads=4)

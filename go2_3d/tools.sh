@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-check}" in
+  export-map)
+    project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+    mkdir -p "$project_dir/runtime"
+    if sudo docker container inspect go2-3d >/dev/null 2>&1; then
+      sudo docker logs --tail 500 go2-3d > "$project_dir/runtime/navigation-debug.log" 2>&1
+    fi
+    sudo python3 "$project_dir/go2_3d/export_map.py" --project "$project_dir"
+    ;;
   repair-map)
     project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
     if sudo docker container inspect go2-3d >/dev/null 2>&1; then
@@ -33,5 +41,5 @@ case "${1:-check}" in
   shell)
     sudo docker exec -it go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec bash --norc'
     ;;
-  *) echo 'Usage: tools.sh [repair-map|check|diagnose|navcheck GOAL_X GOAL_Y|save|enable|disable|shell]' >&2; exit 2 ;;
+  *) echo 'Usage: tools.sh [export-map|repair-map|check|diagnose|navcheck GOAL_X GOAL_Y|save|enable|disable|shell]' >&2; exit 2 ;;
 esac

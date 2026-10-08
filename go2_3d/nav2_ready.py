@@ -38,7 +38,7 @@ class Nav2Ready(Node):
         ready = self.valid and self.received is not None and now-self.received<0.5
         if ready:
             try:
-                pose = self.buffer.lookup_transform('map','base_link',Time())
+                pose = self.buffer.lookup_transform('map','base_footprint',Time())
                 stamp = Time.from_msg(pose.header.stamp)
                 ready = 0 <= (self.get_clock().now()-stamp).nanoseconds/1e9<0.3
             except TransformException:
