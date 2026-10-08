@@ -94,6 +94,10 @@ SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用
 - 该地图的原点是建图第一帧机身位置；平地机身 `z` 大致为 0。
 - 如果当前 Foxglove 版本不支持该工具，使用 Publish 面板发布该类型，填写真实位置与朝向。
 
+左侧“主题”列表展开 `/initialpose` 只设置位姿消息的显示样式，不会启用鼠标发布工具。
+3D 场景右侧的发布工具与主题显示设置是不同入口；若当前版本无法选用它，先使用下方 SSH 方法。
+`/initialpose` 必须有 `header.frame_id: map` 和有效的四元数，默认空参考系消息会被 GICP 拒绝。
+
 初始位姿示例（只有回到建图起点、同一朝向时才适用）：
 
 ```json
@@ -105,6 +109,30 @@ SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用
   }
 }
 ```
+
+也可通过第二个 SSH 终端初始化。先保持机器人静止，运动关闭；**以下零位姿仅适用于
+回到建图起点、同一朝向及站立高度的情况**：
+
+```bash
+bash ~/go2_nav/go2_3d/tools.sh shell
+ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped '{header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}}'
+ros2 topic echo /localization/valid
+```
+
+最后一条会持续显示定位有效性，按 Ctrl+C 结束观察，输入 `exit` 返回宿主机。
+初始位姿是近似提示；日志收到 seed 不代表已经定位成功，必须等 GICP 匹配通过。
+若机器人在其他位置，应填写其真实地图位置及朝向，不能照用零位姿。
+
+没有 `map → odom` 时，全局代价地图会等待 `base_link → map`，局部代价地图也不能
+在 Foxglove 的 `map` 参考系下显示。先使定位有效，再在容器 shell 中检查：
+
+```bash
+ros2 lifecycle get /controller_server
+ros2 lifecycle get /planner_server
+```
+
+都应为 `active`；若定位已有效而代价地图仍不可见，保留生命周期输出并运行只读诊断。
+不要发布固定 `map → odom` 绕过 GICP 来消除等待提示。
 
 等待 `/localization/valid` 连续为 `true`，查看 `/localization/status` 的 fitness/RMSE，
 并检查当前点云与三维地图是否重合。单独一个 `true` 不保证场景无歧义。
