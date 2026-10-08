@@ -10,7 +10,6 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, CompressedImage
 from std_msgs.msg import String, Bool
 from tf2_ros import Buffer, TransformListener, TransformException
-from tf2_msgs.msg import TFMessage
 from geometry import cloud_xyz
 from geometry import pose_matrix, rotation_angle
 
@@ -20,10 +19,8 @@ class Diagnostics(Node):
         super().__init__('go2_3d_readonly_diagnostics')
         self.latest, self.counts, self.received = {}, {}, {}
         self.tf_samples = {('odom','base_link'):[], ('map','odom'):[]}
-        self.tf_sources = {edge:set() for edge in self.tf_samples}
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer,self)
-        self.create_subscription(TFMessage,'/tf',self.observe_tf_sources,qos_profile_sensor_data)
         self.retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
                                    durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.types = {
@@ -43,12 +40,6 @@ class Diagnostics(Node):
             self.create_subscription(kind,topic,receive,
                                      self.retained if topic == '/map_cloud' else qos_profile_sensor_data)
         self.create_timer(0.05,self.sample_tf)
-
-    def observe_tf_sources(self,message,info):
-        for tf in message.transforms:
-            edge = (tf.header.frame_id,tf.child_frame_id)
-            if edge in self.tf_sources:
-                self.tf_sources[edge].add(bytes(info.publisher_gid))
 
     def sample_tf(self):
         for (parent,child),samples in self.tf_samples.items():
@@ -100,10 +91,10 @@ class Diagnostics(Node):
                 return message.header.stamp.sec+message.header.stamp.nanosec/1e9
             difference = stamp(self.latest['/utlidar/cloud_base'])-stamp(self.latest['/utlidar/robot_odom'])
             lines.append(f'Latest raw cloud_stamp - odom_stamp = {difference:.6f}s (asynchronous samples)')
+        endpoints = self.get_publishers_info_by_topic('/tf')
+        lines.append('TF topic publisher nodes (not per-edge authority): '+str([
+            endpoint.node_namespace.rstrip('/')+'/'+endpoint.node_name for endpoint in endpoints]))
         for parent,child in (('odom','base_link'),('map','odom')):
-            sources = len(self.tf_sources[(parent,child)])
-            lines.append(f'TF {parent} -> {child}: observed_dynamic_publishers={sources}'+
-                         (' CONFLICT: multiple publishers for the same TF edge' if sources>1 else ''))
             try:
                 tf = self.buffer.lookup_transform(parent,child,Time())
                 stamp = tf.header.stamp.sec+tf.header.stamp.nanosec/1e9
