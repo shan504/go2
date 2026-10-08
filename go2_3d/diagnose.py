@@ -10,6 +10,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, CompressedImage
 from std_msgs.msg import String, Bool
 from tf2_ros import Buffer, TransformListener, TransformException
+from tf2_msgs.msg import TFMessage
 from geometry import cloud_xyz
 from geometry import pose_matrix, rotation_angle
 
@@ -19,12 +20,17 @@ class Diagnostics(Node):
         super().__init__('go2_3d_readonly_diagnostics')
         self.latest, self.counts, self.received = {}, {}, {}
         self.tf_samples = {('odom','base_link'):[], ('map','odom'):[]}
+        self.tf_sources = {edge:set() for edge in self.tf_samples}
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer,self)
+        self.create_subscription(TFMessage,'/tf',self.observe_tf_sources,qos_profile_sensor_data)
         self.retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
                                    durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.types = {
             '/utlidar/cloud_base':PointCloud2,'/utlidar/robot_odom':Odometry,
+            '/utlidar/cloud_deskewed':PointCloud2,'/utlidar/voxel_map':PointCloud2,
+            '/uslam/cloud_map':PointCloud2,'/uslam/frontend/cloud_world_ds':PointCloud2,
+            '/uslam/frontend/odom':Odometry,
             '/point_cloud2':PointCloud2,'/registered_cloud':PointCloud2,'/odom':Odometry,'/map_cloud':PointCloud2,
             '/camera/image/compressed':CompressedImage,
             '/localization/status':String,'/localization/valid':Bool,
@@ -37,6 +43,12 @@ class Diagnostics(Node):
             self.create_subscription(kind,topic,receive,
                                      self.retained if topic == '/map_cloud' else qos_profile_sensor_data)
         self.create_timer(0.05,self.sample_tf)
+
+    def observe_tf_sources(self,message,info):
+        for tf in message.transforms:
+            edge = (tf.header.frame_id,tf.child_frame_id)
+            if edge in self.tf_sources:
+                self.tf_sources[edge].add(bytes(info.publisher_gid))
 
     def sample_tf(self):
         for (parent,child),samples in self.tf_samples.items():
@@ -67,7 +79,7 @@ class Diagnostics(Node):
                 continue
             stamp = message.header.stamp.sec+message.header.stamp.nanosec/1e9
             prefix += f' frame={message.header.frame_id!r} stamp={stamp:.6f}'
-            if not topic.startswith('/utlidar/'):
+            if not topic.startswith(('/utlidar/','/uslam/')):
                 prefix += f' host_age={now/1e9-stamp:.3f}s'
             if kind is Odometry:
                 prefix += f' child={message.child_frame_id!r}'
@@ -89,6 +101,9 @@ class Diagnostics(Node):
             difference = stamp(self.latest['/utlidar/cloud_base'])-stamp(self.latest['/utlidar/robot_odom'])
             lines.append(f'Latest raw cloud_stamp - odom_stamp = {difference:.6f}s (asynchronous samples)')
         for parent,child in (('odom','base_link'),('map','odom')):
+            sources = len(self.tf_sources[(parent,child)])
+            lines.append(f'TF {parent} -> {child}: observed_dynamic_publishers={sources}'+
+                         (' CONFLICT: multiple publishers for the same TF edge' if sources>1 else ''))
             try:
                 tf = self.buffer.lookup_transform(parent,child,Time())
                 stamp = tf.header.stamp.sec+tf.header.stamp.nanosec/1e9
