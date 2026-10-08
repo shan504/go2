@@ -22,7 +22,7 @@ from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
 from tf2_ros import Buffer, TransformListener, TransformBroadcaster, TransformException
 from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
                       cloud_xyz, filter_points, rotation_angle, ObservedGrid)
-from registration import cloud, align, static_correction_is_consistent
+from registration import cloud, align, static_correction_is_consistent, blend_correction
 from ros_cloud import xyz_message
 
 
@@ -42,10 +42,14 @@ class Mapper(Node):
                         max_map_points=200000, submap_radius=25.0,
                         registration_period=0.5, validity_timeout=1.0,
                         correspondence_distance=0.7, min_fitness=0.55, max_rmse=0.20,
-                        max_translation=0.6, max_rotation=0.35)
+                        max_translation=0.6, max_rotation=0.35,
+                        localization_voxel_size=0.05, localization_correspondence=0.20,
+                        correction_alpha=0.25)
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self.p = {k: self.get_parameter(k).value for k in defaults}
+        if not 0 < self.p['correction_alpha'] <= 1:
+            raise ValueError('correction_alpha must be greater than 0 and at most 1')
         if self.p['mode'] not in ('mapping','localization'):
             raise ValueError('mode must be mapping or localization')
         self.lock = threading.RLock()
@@ -63,6 +67,7 @@ class Mapper(Node):
         self.last_keyframe_time = None
         self.points = np.empty((0,3))
         self.registration_points = np.empty((0,3))
+        self.localization_points = np.empty((0,3))
         self.grid = ObservedGrid(self.p['grid_resolution'])
         if self.p['mode'] == 'localization':
             directory = Path(self.p['map_directory'])
@@ -70,6 +75,7 @@ class Mapper(Node):
             if len(self.points) < 100:
                 raise ValueError('Missing/empty 3D map.pcd; localization cannot start')
             self.registration_points = np.asarray(cloud(self.points,self.p['voxel_size']).points).copy()
+            self.localization_points = np.asarray(cloud(self.points,self.p['localization_voxel_size']).points).copy()
             self.get_logger().info('Loaded 3D map; waiting for /initialpose in map frame')
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
@@ -151,6 +157,7 @@ class Mapper(Node):
             # Arrays are replaced, never edited in place; snapshot references
             # stay valid while callbacks replace the current map.
             points = self.registration_points
+            localization_points = self.localization_points
             history = list(self.history)
             previous_odom = self.accepted_odom
         try:
@@ -166,13 +173,14 @@ class Mapper(Node):
                     frames.append(transform_points(xyz,inverse_odom@frame_odom))
             input_points = filter_points(np.vstack(frames))
             source = cloud(input_points, self.p['voxel_size'])
+            registration_count = len(source.points)
             if len(source.points) < 100:
                 raise ValueError('Too few finite/range-filtered cloud points')
             guess = correction @ odom_base
             if not len(points) and self.p['mode'] == 'mapping':
                 # First body pose is the map origin, with floor_z relative to it.
                 matched, fitness, rmse = np.eye(4), 1.0, 0.0
-            else:
+            elif self.p['mode'] == 'mapping' or not seeded:
                 nearby = points[np.linalg.norm(points-guess[:3,3],axis=1) < self.p['submap_radius']]
                 result = align(source, cloud(nearby, None), guess,
                                correspondence=self.p['correspondence_distance'],
@@ -182,16 +190,43 @@ class Mapper(Node):
                 if not result.accepted:
                     raise ValueError(f'{result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}')
                 matched, fitness, rmse = result.transform, result.fitness, result.rmse
+            else:
+                # Once localized, trust timestamped odometry for the initial
+                # guess rather than starting from a coarse, potentially aliased match.
+                matched = guess
+            if self.p['mode'] == 'localization':
+                nearby = localization_points[np.linalg.norm(localization_points-guess[:3,3],axis=1) < self.p['submap_radius']]
+                expected = transform_points(input_points,matched)
+                margin = 2*self.p['localization_correspondence']
+                lower,upper = expected.min(axis=0)-margin,expected.max(axis=0)+margin
+                nearby = nearby[np.all((nearby >= lower)&(nearby <= upper),axis=1)]
+                fine_source = cloud(input_points,self.p['localization_voxel_size'])
+                registration_count = len(fine_source.points)
+                result = align(fine_source,cloud(nearby,None),matched,
+                               correspondence=self.p['localization_correspondence'],
+                               min_fitness=self.p['min_fitness'],max_rmse=min(self.p['max_rmse'],0.10),
+                               max_translation=self.p['max_translation'] if seeded else 2.0,
+                               max_rotation=self.p['max_rotation'] if seeded else 0.8,
+                               iterations=25,innovation_guess=guess)
+                if not result.accepted:
+                    raise ValueError(f'Fine GICP {result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}')
+                matched,fitness,rmse = result.transform,result.fitness,result.rmse
             new_correction = matched@np.linalg.inv(odom_base)
             if not static_correction_is_consistent(correction,new_correction,previous_odom,odom_base):
-                raise ValueError('Rejected GICP correction jump while odometry stationary (limit 0.05m / 2deg)')
+                jump = np.linalg.inv(guess)@matched
+                raise ValueError(f'Rejected GICP correction jump while odometry stationary: {np.linalg.norm(jump[:3,3]):.3f}m / {np.degrees(rotation_angle(jump)):.2f}deg (limit 0.05m / 2deg)')
             age = (self.get_clock().now()-Time.from_msg(message.header.stamp)).nanoseconds/1e9
             if time.monotonic()-received > self.p['validity_timeout'] or age > self.p['validity_timeout']:
                 raise ValueError('Registration result too old; reduce cloud/submap size or processing load')
             with self.lock:
                 if generation != self.generation:
                     return
-                self.correction = new_correction
+                # Never filter a rejected match. Bootstrap/reseed snaps only
+                # after GICP acceptance; later correction noise is damped while
+                # odom->base_link retains the full measured robot motion.
+                self.correction = (blend_correction(correction,new_correction,self.p['correction_alpha'],odom_base)
+                                   if self.p['mode'] == 'localization' and seeded else new_correction)
+                matched = self.correction@odom_base
                 self.seeded = True
                 # Registration stays coarse for ARM CPU cost. Retain original
                 # XYZ at a finer resolution for the 3D map and visual scan.
@@ -221,7 +256,7 @@ class Mapper(Node):
                 self.broadcaster.sendTransform(transform)
                 header = Header(stamp=message.header.stamp,frame_id='map')
                 self.registered_pub.publish(xyz_message(header,new))
-            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={len(source.points)}'))
+            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}'))
         except Exception as error:
             with self.lock:
                 if generation == self.generation:

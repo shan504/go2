@@ -20,7 +20,7 @@
 
 观察稳定的三维场景时，先只开启 `/registered_cloud` 和 `/map_cloud`。
 这两个话题保留 XYZ，颜色字段选 `z`（高度）；它们没有 `intensity` 字段。
-`/registered_cloud` 是实际 GICP 配准结果，只在配准通过时更新；`/map_cloud` 是保存到 PCD 的地图。
+`/registered_cloud` 使用通过 GICP 检查后的位姿（定位时包含校正滤波），与发布的 TF 一致，只在配准通过时更新；`/map_cloud` 是保存到 PCD 的地图。
 地图点云衰减时间保持 0，避免把每次重复发布的全图叠加。
 实时 `/point_cloud2` 是机身坐标系单帧扫描，衰减时间 0 时显示每帧采样变化；
 在稳定 `odom`/`map` 参考系下可以设置 0.5–1 秒观察扫描覆盖，但显示累积不等同于建图或定位成功。
@@ -87,16 +87,33 @@ SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用
 此时加载 `maps/latest` 的三维 PCD 与对应栅格，运动默认关闭。
 使用稠密扫描窗口时执行 `bash go2_3d/run.sh navigation dense`；不会改变已经保存的 PCD 分辨率。
 
-在 3D 面板工具设置中：
+在 3D 面板的齿轮设置中，向下找到“发布 / Publish”分组（不是“主题”中的 `/initialpose`）：
 
-- 初始位姿工具使用 `/initialpose`，类型 `geometry_msgs/msg/PoseWithCovarianceStamped`。
-- 固定参考系使用 `map`，点击地图上的实际位置并拖动朝向。
-- 该地图的原点是建图第一帧机身位置；平地机身 `z` 大致为 0。
-- 如果当前 Foxglove 版本不支持该工具，使用 Publish 面板发布该类型，填写真实位置与朝向。
+1. 类型选择“位姿估计 / Pose estimate”，话题填写 `/initialpose`。
+2. 显示参考系设为 `map`，用右侧 `3D` 按钮切换到俯视视图，方便选取 XY 位置。
+3. 场景右侧“尺子”下方、带小三角的按钮是发布工具；默认图标是圆靶心。
+   长按该按钮约 1 秒可打开菜单，选择 **Publish pose estimate**。
+4. 选择类型后，再单击发布工具按钮启用它，按钮应变蓝。
+5. 在地图中**单击一次实际位置**，松开鼠标并移动到朝向方向；再**单击一次**确认并发布。
+   这里是两次单击，不是 RViz 的按住拖动后松开。每次操作结束后需再次启用工具。
 
 左侧“主题”列表展开 `/initialpose` 只设置位姿消息的显示样式，不会启用鼠标发布工具。
-3D 场景右侧的发布工具与主题显示设置是不同入口；若当前版本无法选用它，先使用下方 SSH 方法。
+该地图的原点是建图第一帧机身位置；相同站立高度下机身 `z` 大致为 0。
+如果当前版本无法选用鼠标工具，使用下方 SSH 方法或 Publish 面板填写真实位置与朝向。
 `/initialpose` 必须有 `header.frame_id: map` 和有效的四元数，默认空参考系消息会被 GICP 拒绝。
+
+可直接导入 [预设导航布局](foxglove_go2_navigation.json)。它包含两个俯视 3D 面板：
+左面板预设 `/initialpose` 位姿估计，右面板预设 `/goal_pose` 位姿目标；相机、定位状态和
+启用/停止/取消按钮同时显示。通过 Foxglove 布局菜单选择“从文件导入 / Import from file”。
+Windows PowerShell 下载文件：
+
+```powershell
+Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/shan504/go2/main/docs/foxglove_go2_navigation.json' -OutFile "$env:USERPROFILE\Downloads\go2_navigation.json"
+```
+
+导入后连接当前 `ws://192.168.123.18:8765` 数据源；导入本身不会发布消息或启用运动。
+鼠标工具仍需单击启用，再依次点击位置和朝向。布局只减少设置步骤；桌面版本兼容性待用户导入确认。
+布局缩小坐标轴并关闭重叠标签以改善可读性，这不会改变 ROS TF 或修复定位误差。
 
 初始位姿示例（只有回到建图起点、同一朝向时才适用）：
 
@@ -137,6 +154,11 @@ ros2 lifecycle get /planner_server
 等待 `/localization/valid` 连续为 `true`，查看 `/localization/status` 的 fitness/RMSE，
 并检查当前点云与三维地图是否重合。单独一个 `true` 不保证场景无歧义。
 重新初始化同样使用 `/initialpose`；目标取消前不要在运动中重新设定位姿。
+定位使用 5 厘米点云进行细 GICP、20 厘米匹配距离及最多 10 厘米 RMSE。
+初次/重定位先粗配准再细配准；连续定位从时间戳里程计预测位姿开始细配准。
+仅通过匹配和静止跳变检查的 `map → odom` 校正会进行平移/旋转滤波（`correction_alpha=0.25`），
+真实 `odom → base_link` 运动不做该滤波。拒绝匹配或失去数据仍使定位无效并触发停止。
+这能抑制模拟场景中的小幅校正噪声，不能保证任何实机地图都无抖动；持续拒绝时运行只读诊断。
 
 ## 导航
 
@@ -144,7 +166,8 @@ ros2 lifecycle get /planner_server
 查看 `/operator/status` 确认参数设置成功。随后使用 3D 面板的发布位姿工具：
 
 - 目标话题 `/goal_pose`，类型 `geometry_msgs/msg/PoseStamped`，参考系 `map`。
-- 点击已观察到的空地并拖动目标朝向。
+- 在设置的“发布”分组选择“位姿 / Pose”，话题为 `/goal_pose`；或长按场景右侧发布工具选择 **Publish pose**。
+- 再单击工具按钮启用它；在已观察到的空地单击一次，移动鼠标指定到达朝向，再单击一次发布。
 - 首次选近距离目标，观察 `/plan`、局部障碍和机器人响应。
 
 新增的 `operator_bridge.py` 把 `/goal_pose` 转换为 `/navigate_to_pose` action。

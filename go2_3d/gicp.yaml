@@ -18,3 +18,7 @@ go2_gicp:
     max_rmse: 0.20
     max_translation: 0.6
     max_rotation: 0.35
+    # Refine against the saved 3D map; keep real odometry motion unchanged.
+    localization_voxel_size: 0.05
+    localization_correspondence: 0.20
+    correction_alpha: 0.25

@@ -46,9 +46,11 @@ class Sensors(Node):
         self.save = self.create_publisher(Empty,'/mapping/save',1)
         self.valid = None
         self.operator_status = ''
+        self.localization_status = ''
         self.registered = None
         self.create_subscription(Bool,'/localization/valid',lambda m: setattr(self,'valid',m.data),1)
         self.create_subscription(String,'/operator/status',lambda m: setattr(self,'operator_status',m.data),1)
+        self.create_subscription(String,'/localization/status',lambda m: setattr(self,'localization_status',m.data),1)
         self.create_subscription(PointCloud2,'/registered_cloud',lambda m: setattr(self,'registered',m),qos_profile_sensor_data)
         self.points = room()
         self.truth, self.odom = np.eye(4),np.eye(4)
@@ -130,15 +132,31 @@ def phase(directory,mode,dense=False):
             wait_for(lambda: sensors.valid is False and mapper.latest is not None)
             assert not mapper.initialized,'Localization must wait for initialpose'
             pose = PoseWithCovarianceStamped()
-            pose.header.frame_id = 'map'
             pose.pose.pose.orientation.w = 1.0
             sensors.initial.publish(pose)
+            time.sleep(0.3)
+            assert not mapper.initialized,'An empty frame_id must not initialize localization'
+            pose.header.frame_id = 'map'
+            sensors.initial.publish(pose)
             wait_for(lambda: sensors.valid is True)
+            wait_for(lambda: 'fine=True' in sensors.localization_status)
             wait_for(lambda: sensors.correction_matches(np.eye(4)))
+            # A contradictory fresh scan with unchanged odometry must fail,
+            # not be smoothed into a valid localization or published TF.
+            sensors.truth = pose_matrix([0.12,0,0],[0,0,0,1])
+            wait_for(lambda: 'Rejected GICP correction jump' in sensors.localization_status)
+            wait_for(lambda: sensors.valid is False)
+            with mapper.lock:
+                rejected_correction = mapper.correction.copy()
+            time.sleep(1.0)
+            np.testing.assert_allclose(mapper.correction,rejected_correction,atol=1e-8)
+            assert sensors.valid is False,'Rejected scan was falsely reported valid'
+            sensors.truth = np.eye(4)
+            wait_for(lambda: sensors.valid is True)
             sensors.stop.set()
             sensors.emitter.join()
             wait_for(lambda: sensors.valid is False,seconds=5)
-            print('PASS ROS localization: PCD reload + initialpose + GICP + stale-sensor invalidation')
+            print('PASS ROS localization: PCD reload + map-frame initialpose + fine GICP + rejected-jump TF unchanged + stale-sensor invalidation')
     finally:
         sensors.stop.set()
         sensors.emitter.join(timeout=3)

@@ -10,7 +10,7 @@ import open3d as o3d
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
 from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
                       cloud_xyz, filter_points, ObservedGrid)
-from registration import cloud, align, static_correction_is_consistent
+from registration import cloud, align, static_correction_is_consistent, blend_correction
 
 
 def room():
@@ -68,6 +68,44 @@ class GeometryTests(unittest.TestCase):
 
 
 class GICPTests(unittest.TestCase):
+    def test_fine_gicp_with_changing_low_height_scans(self):
+        points = room()
+        points = points[points[:,2] < 0.5]
+        truth = pose_matrix([0.42,-0.18,0.04],[0,0,math.sin(0.08/2),math.cos(0.08/2)])
+        guess = pose_matrix([0.40,-0.16,0.03],[0,0,math.sin(0.07/2),math.cos(0.07/2)])
+        rng = np.random.default_rng(71)
+        target = cloud(points,0.05)
+        for _ in range(5):
+            sampled = points[rng.choice(len(points),1300,replace=False)]
+            scan = transform_points(sampled,np.linalg.inv(truth))+rng.normal(0,0.005,sampled.shape)
+            result = align(cloud(scan,0.05),target,guess,correspondence=0.20,max_rmse=0.10,iterations=25)
+            self.assertTrue(result.accepted,result)
+            np.testing.assert_allclose(result.transform,truth,atol=0.02)
+
+    def test_filter_reduces_noise_without_filtering_robot_motion(self):
+        previous = np.eye(4)
+        observed,filtered = [],[]
+        for sign in [1,-1]*12:
+            noisy = pose_matrix([sign*0.02,0,0],[0,0,math.sin(sign*0.01/2),math.cos(sign*0.01/2)])
+            previous = blend_correction(previous,noisy,0.25)
+            observed.append(noisy[0,3])
+            filtered.append(previous[0,3])
+            np.testing.assert_allclose(previous[:3,:3].T@previous[:3,:3],np.eye(3),atol=1e-8)
+        self.assertLess(np.std(filtered),np.std(observed)/2)
+        odom = pose_matrix([0.4,0,0],[0,0,0,1])
+        np.testing.assert_allclose(blend_correction(np.eye(4),np.eye(4))@odom,odom,atol=1e-8)
+        with self.assertRaises(ValueError):
+            blend_correction(np.eye(4),np.eye(4),0)
+
+    def test_stationary_check_and_filter_at_distant_odometry_origin(self):
+        odom = pose_matrix([100,0,0],[0,0,0,1])
+        measured_base = pose_matrix([100,0,0],[0,0,math.sin(0.02/2),math.cos(0.02/2)])
+        correction = measured_base@np.linalg.inv(odom)
+        self.assertGreater(np.linalg.norm(correction[:3,3]),1.0)
+        self.assertTrue(static_correction_is_consistent(np.eye(4),correction,odom,odom))
+        filtered_base = blend_correction(np.eye(4),correction,0.25,odom)@odom
+        np.testing.assert_allclose(filtered_base[:3,3],[100,0,0],atol=1e-8)
+
     def test_stationary_false_match_jump_rejected(self):
         prior = np.eye(4)
         jitter = pose_matrix([0.147,0,0],[0,0,math.sin(math.radians(5.2)/2),math.cos(math.radians(5.2)/2)])
