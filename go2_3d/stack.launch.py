@@ -51,6 +51,7 @@ def generate_launch_description():
              condition=navigation,parameters=[{'autostart':True,'node_names':['map_server'],'use_sim_time':False}]),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(str(Path(get_package_share_directory('nav2_bringup'))/'launch/navigation_launch.py')),
              condition=navigation,launch_arguments={'params_file':params,'use_sim_time':'false',
-                                                   'autostart':'true','use_composition':'false'}.items()),
+                                                   # Humble evaluates this inside PythonExpression(['not ', ...]).
+                                                   'autostart':'true','use_composition':'False'}.items()),
         IncludeLaunchDescription(FrontendLaunchDescriptionSource(str(Path(get_package_share_directory('foxglove_bridge'))/'launch/foxglove_bridge_launch.xml'))),
     ])
