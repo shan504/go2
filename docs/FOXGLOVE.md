@@ -115,6 +115,23 @@ Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/shan504/go2/main/docs/
 鼠标工具仍需单击启用，再依次点击位置和朝向。布局只减少设置步骤；桌面版本兼容性待用户导入确认。
 布局缩小坐标轴并关闭重叠标签以改善可读性，这不会改变 ROS TF 或修复定位误差。
 
+### 只剩发布按钮、3D 面板不见了
+
+重新导入上面的完整布局，恢复两个 3D 面板和正常分割比例。现有布局中的代价地图
+透明度调整不需要拖动面板分割线；发布按钮区域占满窗口时，先恢复布局再查看数据。
+也可在 Windows 本机 PowerShell 从机器狗电脑下载当前仓库中的布局：
+
+```powershell
+scp unitree@192.168.123.18:/home/unitree/go2_nav/docs/foxglove_go2_navigation.json "$env:USERPROFILE\Downloads\go2_navigation.json"
+```
+
+在 Foxglove 顶部布局菜单选择从文件导入，再连接 `ws://192.168.123.18:8765`。
+导入只恢复显示和工具设置，不发布初始位姿。若日志最后出现 `user interrupted with ctrl-c`，
+先在第一个 SSH 终端重新运行 `bash ~/go2_nav/go2_3d/run.sh navigation dense` 并保持运行，
+再从第二个 SSH 终端或 3D 面板设置当前真实初始位姿。
+`Invalid frame ID "map"` 是 TF 不可用，需要检查 GICP 是否收到初始位姿并通过匹配；
+仅加载地图或导入布局不会建立 `map → odom`。
+
 初始位姿示例（只有回到建图起点、同一朝向时才适用）：
 
 ```json
