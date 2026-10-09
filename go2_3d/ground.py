@@ -52,6 +52,46 @@ def heights(points, model):
     return np.asarray(points)@plane[:3]+plane[3]
 
 
+def level_transform(model):
+    """Rigidly rotate an upward ground normal to Z and put that plane at z=0."""
+    plane = np.asarray(model['plane'],dtype=float)
+    if plane.shape != (4,) or not np.isfinite(plane).all():
+        raise ValueError('Invalid ground plane')
+    norm = np.linalg.norm(plane[:3])
+    if norm < 1e-8:
+        raise ValueError('Invalid ground normal')
+    plane /= norm
+    n = plane[:3]
+    if n[2] < np.cos(np.deg2rad(12)):
+        raise ValueError('Ground normal must face up and be within 12 degrees of Z')
+    v = np.cross(n,[0.,0.,1.])
+    skew = np.array([[0.,-v[2],v[1]],[v[2],0.,-v[0]],[-v[1],v[0],0.]])
+    transform = np.eye(4)
+    transform[:3,:3] = np.eye(3)+skew+skew@skew/(1+n[2])
+    transform[2,3] = plane[3]
+    return transform
+
+
+def body_seed_position(position, model=None, body_height=None):
+    """Lift a conventional z=0 2D initialpose to standing body height.
+
+    Legacy maps without a saved body-height contract and explicit nonzero Z
+    retain their existing body-pose semantics. Height is normal to the floor.
+    """
+    result = np.asarray(position,dtype=float).copy()
+    if result.shape != (3,) or not np.isfinite(result).all():
+        raise ValueError('Invalid initial position')
+    if model is None or body_height is None or abs(result[2]) > 1e-8:
+        return result
+    plane = np.asarray(model['plane'],dtype=float)
+    if (plane.shape != (4,) or not np.isfinite(plane).all() or
+            plane[2] < 0.9 or not np.isclose(np.linalg.norm(plane[:3]),1.,atol=1e-5) or
+            not np.isfinite(body_height) or not 0.1 < body_height < 1.0):
+        raise ValueError('Invalid saved standing height/ground plane')
+    result[2] = (body_height-plane[3]-plane[:2]@result[:2])/plane[2]
+    return result
+
+
 def floor_and_obstacles(points, model, min_height=0.10, max_height=1.5):
     h = heights(points,model)
     floor = points[np.abs(h)<=0.035]

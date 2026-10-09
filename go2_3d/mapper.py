@@ -24,7 +24,7 @@ from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
                       cloud_xyz, filter_points, rotation_angle, ObservedGrid, planar_pose, first_map_pose)
 from registration import cloud, align, static_correction_is_consistent, blend_correction
 from ros_cloud import xyz_message
-from ground import estimate_ground
+from ground import estimate_ground,body_seed_position
 
 
 def transform_matrix(transform):
@@ -75,8 +75,10 @@ class Mapper(Node):
         self.registration_points = np.empty((0,3))
         self.localization_points = np.empty((0,3))
         self.grid = ObservedGrid(self.p['grid_resolution'])
+        self.map_metadata = {}
         if self.p['mode'] == 'localization':
             directory = Path(self.p['map_directory'])
+            self.map_metadata = yaml.safe_load((directory/'metadata.yaml').read_text())
             self.points = np.asarray(o3d.io.read_point_cloud(str(directory/'map.pcd')).points).copy()
             if len(self.points) < 100:
                 raise ValueError('Missing/empty 3D map.pcd; localization cannot start')
@@ -149,7 +151,10 @@ class Mapper(Node):
                 return
             pose = message.pose.pose
             try:
-                map_base = pose_matrix([pose.position.x,pose.position.y,pose.position.z],
+                position = body_seed_position([pose.position.x,pose.position.y,pose.position.z],
+                                             self.map_metadata.get('ground_model'),
+                                             self.map_metadata.get('body_height_above_ground'))
+                map_base = pose_matrix(position,
                                        [pose.orientation.x,pose.orientation.y,pose.orientation.z,pose.orientation.w])
             except ValueError as error:
                 self.get_logger().error(str(error))

@@ -45,7 +45,9 @@ def repair(root):
     metadata = yaml.safe_load((source/'metadata.yaml').read_text())
     points = np.asarray(o3d.io.read_point_cloud(str(source/'map.pcd')).points)
     p = metadata['parameters']
-    ground = estimate_ground(points,p.get('floor_z',-0.30))
+    # A leveled map has floor z=0; it is not a body-origin map with ground below
+    # -0.10. Reuse its validated plane instead of fitting below the new origin.
+    ground = metadata['ground_model'] if metadata.get('ground_aligned') else estimate_ground(points,p.get('floor_z',-0.30))
     destination = root/('repaired-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
     destination.mkdir()
     try:
