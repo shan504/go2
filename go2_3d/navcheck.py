@@ -11,7 +11,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profile_sensor_data
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
+from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener, TransformException
@@ -37,6 +38,7 @@ class NavCheck(Node):
     def __init__(self, goal):
         super().__init__('go2_nav_readonly_check')
         self.goal, self.latest, self.received = goal, {}, {}
+        self.velocity_stats, self.first_odom = {}, None
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer,self)
         retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
@@ -45,10 +47,19 @@ class NavCheck(Node):
                  '/local_costmap/costmap':OccupancyGrid,'/scan':LaserScan,
                  '/point_cloud2':PointCloud2,
                  '/localization/valid':Bool,'/localization/status':String,
-                 '/operator/status':String}
+                 '/operator/status':String, '/cmd_vel_nav':Twist, '/cmd_vel':Twist,
+                 '/odom':Odometry}
         for topic,kind in kinds.items():
             def receive(msg,topic=topic):
                 self.latest[topic], self.received[topic] = msg,time.monotonic()
+                if isinstance(msg, Twist):
+                    velocity = np.array([msg.linear.x,msg.linear.y,msg.angular.z])
+                    stats = self.velocity_stats.setdefault(topic, {'messages':0,'nonzero':0,'max_abs':np.zeros(3)})
+                    stats['messages'] += 1
+                    stats['nonzero'] += int(np.any(np.abs(velocity)>0.001))
+                    stats['max_abs'] = np.maximum(stats['max_abs'],np.abs(velocity))
+                if isinstance(msg, Odometry) and self.first_odom is None:
+                    self.first_odom = np.array([msg.pose.pose.position.x,msg.pose.pose.position.y])
             self.create_subscription(kind,topic,receive,
                                      retained if kind is OccupancyGrid or topic == '/operator/status' else qos_profile_sensor_data)
 
@@ -72,6 +83,20 @@ class NavCheck(Node):
             msg = self.latest.get(topic)
             age = time.monotonic()-self.received[topic] if msg else math.inf
             lines.append(f'{topic}: {msg.data if msg else "NO MESSAGES"} receipt_age={age:.2f}s')
+        for topic in ('/cmd_vel_nav','/cmd_vel'):
+            stats = self.velocity_stats.get(topic)
+            if stats:
+                lines.append(f'{topic}: messages={stats["messages"]} nonzero={stats["nonzero"]} '
+                             f'max_abs_vx_vy_yaw={stats["max_abs"].round(4).tolist()} '
+                             f'receipt_age={time.monotonic()-self.received[topic]:.2f}s')
+            else:
+                lines.append(f'{topic}: NO MESSAGES; publishers={self.count_publishers(topic)}')
+        odom = self.latest.get('/odom')
+        if odom is not None and self.first_odom is not None:
+            p,v = odom.pose.pose.position,odom.twist.twist
+            distance = float(np.linalg.norm(np.array([p.x,p.y])-self.first_odom))
+            lines.append(f'/odom: displacement_during_check={distance:.3f}m '
+                         f'vx_vy_yaw={[round(v.linear.x,4),round(v.linear.y,4),round(v.angular.z,4)]}')
         try:
             tf = self.buffer.lookup_transform('map','base_link',Time())
             t,q = tf.transform.translation,tf.transform.rotation

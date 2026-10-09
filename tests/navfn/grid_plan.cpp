@@ -43,8 +43,9 @@ int main(int argc, char ** argv) {
       }
     }
   }
-  // Same cost thresholds as the configured InflationLayer: 0.23m padded
-  // inscribed radius, 0.25m total radius, unknown soft inflation disabled.
+  // Historical 0.25m regression fixture: 0.23m padded inscribed radius.
+  // The production configuration now uses the user's requested 0.05m total
+  // radius. This fixture tests earlier denoise/free-area defects, not it.
   for (auto [ox, oy] : occupied) {
     for (int dy = -5; dy <= 5; ++dy) {
       for (int dx = -5; dx <= 5; ++dx) {

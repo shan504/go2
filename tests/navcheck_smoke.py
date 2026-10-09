@@ -8,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile,ReliabilityPolicy,DurabilityPolicy,qos_profile_sensor_data
 from nav_msgs.msg import OccupancyGrid
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped,Twist
 from std_msgs.msg import Bool,Header
 from sensor_msgs.msg import LaserScan,PointCloud2
 from tf2_ros import StaticTransformBroadcaster
@@ -25,6 +25,8 @@ local_pub=source.create_publisher(OccupancyGrid,'/local_costmap/costmap',retaine
 valid_pub=source.create_publisher(Bool,'/localization/valid',10)
 scan_pub=source.create_publisher(LaserScan,'/scan',qos_profile_sensor_data)
 cloud_pub=source.create_publisher(PointCloud2,'/point_cloud2',qos_profile_sensor_data)
+nav_velocity=source.create_publisher(Twist,'/cmd_vel_nav',10)
+smooth_velocity=source.create_publisher(Twist,'/cmd_vel',10)
 broadcaster=StaticTransformBroadcaster(source)
 frames=[]
 for parent,child,x in [('map','odom',0.5),('odom','base_link',0.2)]:
@@ -54,6 +56,9 @@ node=NavCheck((2.25,0.75))
 deadline=time.monotonic()+3
 while time.monotonic()<deadline:
     valid_pub.publish(Bool(data=True))
+    command=Twist(); command.linear.x=0.08
+    nav_velocity.publish(command)
+    smooth_velocity.publish(Twist())
     header=Header(stamp=source.get_clock().now().to_msg(),frame_id='base_link')
     scan=LaserScan(header=header,range_min=0.35,range_max=20.0,ranges=[0.5,1.0,float('inf')])
     scan_pub.publish(scan)
@@ -75,6 +80,9 @@ assert 'at scan stamp+0.05s=True' in summary
 assert 'finite_returns=2' in summary
 assert 'near goal XY (radius 0.25m): points=2' in summary
 assert 'Legacy map lacks a ground model' in summary
+assert node.velocity_stats['/cmd_vel_nav']['nonzero']>0
+assert node.velocity_stats['/cmd_vel']['nonzero']==0
+assert 'max_abs_vx_vy_yaw=[0.08, 0.0, 0.0]' in summary
 data[1,4]=-1
 assert connected(data,(1,0),(4,1))=='NO: goal cell blocked'
 data[:,2]=98
