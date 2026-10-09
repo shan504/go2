@@ -196,8 +196,10 @@ ros2 lifecycle get /planner_server
 
 ## 导航
 
-确认定位与现场状态后，在启用运动面板单次发布 `{"data":true}`。
-查看 `/operator/status` 确认参数设置成功。随后使用 3D 面板的发布位姿工具：
+确认定位与现场状态后，使用 3D 面板的发布位姿工具选择目标。
+运动禁用时，`/operator/status` 显示 `Goal queued`，此时还没有启动 Nav2 的进展计时。
+再在启用运动面板单次发布 `{"data":true}`；程序确认桥的实际启用参数、重新检查定位/TF/目标格后，
+才发送 Nav2 action。先启用再选目标也可。鼠标操作如下：
 
 - 目标话题 `/goal_pose`，类型 `geometry_msgs/msg/PoseStamped`，参考系 `map`。
 - 在设置的“发布”分组选择“位姿 / Pose”，话题为 `/goal_pose`；或长按场景右侧发布工具选择 **Publish pose**。
@@ -211,10 +213,19 @@ Nav2 原生的 `/goal_pose` 订阅在启动组内重映射，避免绕过操作�
 信息包含话题、格子和数值。地图中固定目标归一化为最新时间语义和 yaw 姿态。
 规划失败不再自动执行原地 Spin 或 BackUp，避免把恢复动作误认为目标导航。
 有进行中的目标时先取消，等待 action 完成，再选新目标。
+暂存但尚未启动的目标可以重新点选替换；停止、取消或定位丢失会清除暂存目标。
+`tools.sh enable/disable` 也通过相同操作节点，支持上述顺序。
 
 “启用运动”只是允许运动桥执行 Nav2 的速度命令，不会自己产生前进命令。
-`GridBased failed to generate a valid path` 或 action status=6 表示导航目标失败，
-需要先排查地图和路径。若重启后一直等待 `base_link → map`，先重新初始化 GICP；
+`GridBased failed to generate a valid path` 表示规划失败。
+已收到路径后报 `Failed to make progress` 则需检查速度执行链路；status=6 仅表示 action 已中止，
+不能单凭它判断地图有问题。新目标执行期间，第二个终端运行 `tools.sh navcheck X Y`，
+同时读取 `/cmd_vel_nav`、`/cmd_vel`、`/control/status` 和 `/odom`。
+也可添加“原始消息 / Raw Messages”面板选择 `/control/status`：它显示桥被哪个条件阻断、
+Move 1008 请求数/最近速度和本桥对应的 Sport 响应 code。`received zero /cmd_vel` 表示桥接到的是零速度；
+`forwarding Move requests` 及新鲜的 `last_Move_age` 表示已发请求，仍需真实运动确认。
+没有 Sport 响应不能单独证明失败；响应只按本桥请求 ID 关联，不混入其他 SDK 客户端。
+若重启后一直等待 `base_link → map`，先重新初始化 GICP；
 Ctrl+C 后的 ROS context invalid 错误属于关闭阶段，不能据此判断运动桥故障。
 
 ## 代价地图与规划失败
@@ -272,7 +283,7 @@ Nav2 的 99 表示按机器狗内切半径计算的禁止进入区，100 表示�
 当前容器可以保持运行，先停止运动，再运行 `bash ~/go2_nav/go2_3d/tools.sh inflation-5cm`，
 直接修改两张地图并回读实际参数。无需重建镜像或地图；下一次重启也保持 0.05。
 5 厘米总半径低于机器狗内切半径，Nav2 的对应警告不表示外形检查被禁用。
-先启用运动，再重新发布目标；进展检查从控制器收到目标就开始计时。
+禁用运动时选目标会暂存，启用确认后才启动 action；进展检查从控制器收到目标开始计时。
 全局和局部现均在障碍层后、膨胀层前加入 Nav2 官方 `DenoiseLayer`：
 八方向相连、占据格不足 8 格的独立小块会被移除，因此不再膨胀。
 阈值见 `go2_3d/navigation_filter.yaml`；修改后重启导航。

@@ -47,7 +47,7 @@ class NavCheck(Node):
                  '/local_costmap/costmap':OccupancyGrid,'/scan':LaserScan,
                  '/point_cloud2':PointCloud2,
                  '/localization/valid':Bool,'/localization/status':String,
-                 '/operator/status':String, '/cmd_vel_nav':Twist, '/cmd_vel':Twist,
+                 '/operator/status':String, '/control/status':String, '/cmd_vel_nav':Twist, '/cmd_vel':Twist,
                  '/odom':Odometry}
         for topic,kind in kinds.items():
             def receive(msg,topic=topic):
@@ -61,7 +61,7 @@ class NavCheck(Node):
                 if isinstance(msg, Odometry) and self.first_odom is None:
                     self.first_odom = np.array([msg.pose.pose.position.x,msg.pose.pose.position.y])
             self.create_subscription(kind,topic,receive,
-                                     retained if kind is OccupancyGrid or topic == '/operator/status' else qos_profile_sensor_data)
+                                     retained if kind is OccupancyGrid or topic in ('/operator/status','/control/status') else qos_profile_sensor_data)
 
     def summary(self):
         lines = ['READ-ONLY Nav2 check; no goal, parameter or motion writes',
@@ -79,7 +79,7 @@ class NavCheck(Node):
                              f'padding={p.get("footprint_padding")}')
                 lines.append(f'  plugin order={p["plugins"]}; denoise={p.get("denoise_layer", "MISSING")}')
             lines.append('Global StaticLayer resizes to the saved map; actual grid dimensions follow below.')
-        for topic in ('/localization/valid','/localization/status','/operator/status'):
+        for topic in ('/localization/valid','/localization/status','/operator/status','/control/status'):
             msg = self.latest.get(topic)
             age = time.monotonic()-self.received[topic] if msg else math.inf
             lines.append(f'{topic}: {msg.data if msg else "NO MESSAGES"} receipt_age={age:.2f}s')

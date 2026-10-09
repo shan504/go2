@@ -5,7 +5,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import SetParameters, GetParameters
 from rclpy.action import ActionClient
 from std_msgs.msg import Bool, Empty, String
 from std_srvs.srv import Trigger
@@ -29,6 +29,10 @@ class Operator(Node):
         self.cancel_requested = False
         self.cancelling = False
         self.last_goal_status = None
+        self.waiting_goal = None
+        self.goal_generation = 0
+        self.motion_generation = 0
+        self.enable_query = None
         self.grids = {}
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer,self)
@@ -39,6 +43,7 @@ class Operator(Node):
             self.action = ActionClient(self,NavigateToPose,'/navigate_to_pose')
         self.save = self.create_client(Trigger,'/save_3d_map')
         self.parameters = self.create_client(SetParameters,'/go2_edu_dds_bridge/set_parameters')
+        self.motion_state = self.create_client(GetParameters,'/go2_edu_dds_bridge/get_parameters')
         retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status = self.create_publisher(String,'/operator/status',retained)
@@ -65,8 +70,16 @@ class Operator(Node):
         self.valid, self.valid_received = message.data,time.monotonic()
 
     def watchdog(self):
-        if not self.localized() and (self.goal_handle is not None or self.goal_pending):
+        if not self.localized() and (self.goal_handle is not None or self.goal_pending or self.waiting_goal is not None):
+            if self.waiting_goal is not None:
+                self.report('Queued goal discarded: live localization lost; select a new goal after relocalizing')
             self.on_cancel(Empty())
+        if self.enable_query is not None and time.monotonic()-self.enable_query[2] > 2.0:
+            future,_,_ = self.enable_query
+            self.enable_query = None
+            self.motion_state.remove_pending_request(future)
+            self.on_cancel(Empty())
+            self.report('Goal rejected: motion bridge state query timed out')
 
     def on_save(self,message):
         if self.mode != 'mapping':
@@ -85,6 +98,12 @@ class Operator(Node):
         future.add_done_callback(done)
 
     def on_enable(self,message):
+        self.motion_generation += 1
+        generation = self.motion_generation
+        enabled = bool(message.data)
+        if not enabled:
+            # Cancellation must still work if the parameter service is down.
+            self.on_cancel(Empty())
         if message.data and (self.mode != 'navigation' or not self.localized()):
             self.report('Enable rejected: navigation mode and live GICP localization required')
             return
@@ -95,20 +114,35 @@ class Operator(Node):
         request.parameters = [Parameter('enable_control',value=bool(message.data)).to_parameter_msg()]
         future = self.parameters.call_async(request)
         def done(result):
+            if generation != self.motion_generation:
+                return
             try:
                 results = result.result().results
-                text = 'Motion enable=%s; parameter accepted=%s' % (message.data,all(r.successful for r in results))
-                if message.data and self.goal_handle is None and not self.goal_pending:
+                accepted = len(results)==1 and results[0].successful
+                text = 'Motion enable=%s; parameter accepted=%s' % (enabled,accepted)
+                if not accepted:
+                    text += '; '+('; '.join(r.reason for r in results) or 'missing parameter result')
+                elif enabled and self.waiting_goal is not None:
+                    self.report(text)
+                    self.check_motion_state()
+                    return
+                elif enabled and self.goal_handle is None and not self.goal_pending:
                     text += ('; previous goal failed; fix route and send a new goal' if self.last_goal_status==6
                              else '; no active navigation goal; publish /goal_pose to start')
                 self.report(text)
             except Exception as error:
                 self.report(f'Motion parameter failed: {error}')
         future.add_done_callback(done)
-        if not message.data:
-            self.on_cancel(Empty())
 
     def on_cancel(self,message):
+        self.goal_generation += 1
+        if self.waiting_goal is not None:
+            self.waiting_goal = None
+            self.report('Queued navigation goal cancelled')
+        if self.enable_query is not None:
+            future,_,_ = self.enable_query
+            self.enable_query = None
+            self.motion_state.remove_pending_request(future)
         if self.goal_pending:
             self.cancel_requested = True
         if self.goal_handle is not None and not self.cancelling:
@@ -142,6 +176,63 @@ class Operator(Node):
         except (ValueError,TransformException) as error:
             self.report(f'Goal rejected: {error}')
             return
+        # Selecting a waypoint must not start Nav2's progress timer while the
+        # motion bridge is disabled. Read the real bridge state, not a UI cache.
+        self.goal_generation += 1
+        self.waiting_goal = copy.deepcopy(message)
+        self.check_motion_state()
+
+    def check_motion_state(self):
+        if self.waiting_goal is None:
+            return
+        if self.enable_query is not None:
+            old,_,_ = self.enable_query
+            self.motion_state.remove_pending_request(old)
+            self.enable_query = None
+        if not self.motion_state.service_is_ready():
+            self.on_cancel(Empty())
+            self.report('Goal rejected: motion bridge state service unavailable')
+            return
+        generation = self.goal_generation
+        request = GetParameters.Request(names=['enable_control'])
+        future = self.motion_state.call_async(request)
+        self.enable_query = (future,generation,time.monotonic())
+        def done(result):
+            if self.enable_query is None or self.enable_query[0] is not result:
+                return
+            self.enable_query = None
+            if generation != self.goal_generation or self.waiting_goal is None:
+                return
+            try:
+                values = result.result().values
+                if len(values)!=1 or values[0].type!=Parameter.Type.BOOL.value:
+                    raise ValueError('enable_control is not a boolean parameter')
+                if not values[0].bool_value:
+                    p = self.waiting_goal.pose.position
+                    self.report(f'Goal queued at ({p.x:.2f}, {p.y:.2f}); motion disabled; enable motion to start Nav2')
+                    return
+                self.send_waiting_goal()
+            except Exception as error:
+                self.on_cancel(Empty())
+                self.report(f'Goal rejected: motion state query failed: {error}')
+        future.add_done_callback(done)
+
+    def send_waiting_goal(self):
+        message = self.waiting_goal
+        if message is None:
+            return
+        self.waiting_goal = None
+        # A held waypoint may outlive a map update or localization correction.
+        try:
+            if not self.localized():
+                raise ValueError('live GICP localization required')
+            if not self.action.server_is_ready():
+                raise ValueError('Nav2 NavigateToPose action unavailable')
+            self.validate_goal(message)
+        except (ValueError,TransformException) as error:
+            self.report(f'Queued goal rejected on start: {error}')
+            return
+        p,q = message.pose.position,message.pose.orientation
         goal = self.goal_type.Goal()
         goal.pose = copy.deepcopy(message)
         # This is a fixed map waypoint, not a body-relative historical pose.

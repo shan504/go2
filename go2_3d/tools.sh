@@ -39,7 +39,7 @@ case "${1:-check}" in
   enable|disable)
     value=false
     [[ "$1" == enable ]] && value=true
-    sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && ros2 param set /go2_edu_dds_bridge enable_control "$1"' bash "$value"
+    sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && timeout 10 ros2 topic pub --once /control/enable std_msgs/msg/Bool "{data: $1}"' bash "$value"
     ;;
   shell)
     sudo docker exec -it go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec bash --norc'

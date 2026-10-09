@@ -58,9 +58,9 @@ bash go2_3d/run.sh mapping
 - 固定/显示参考系均为 `map`，网格 `Z 向上`；配准点云与地图按 `z` 高度着色。
 - 前置相机：`/camera/image/compressed`，替换旧 `/robot0/camera/image_raw`。
 - 发布 `/mapping/save` 保存三维地图和 Nav2 栅格。
-- 设置 `/initialpose`；点选 `/goal_pose` 会转换成 Nav2 `NavigateToPose` action。
+- 设置 `/initialpose`；点选 `/goal_pose` 在运动禁用时暂存，启用确认后转换成 Nav2 `NavigateToPose` action。
 - 发布 `/control/enable` 启用或停止运动；`/navigation/cancel` 取消导航。
-- 查看 `/localization/status`、`/localization/valid`、`/operator/status`。
+- 查看 `/localization/status`、`/localization/valid`、`/operator/status`、`/control/status`。
 
 可导入 [预设 Foxglove 导航布局](docs/foxglove_go2_navigation.json)，左 3D 面板用于初始位姿，
 右 3D 面板用于目标点。场景右侧尺子下方的发布工具需要先启用，再依次**单击位置、单击朝向**；
@@ -187,6 +187,10 @@ Jammy 的 0.14 均通过；ROS2 Humble 模拟三维传感器测试通过建图�
 静止跳变被拒绝后不会更新 TF 或报告有效，传感器失效保护继续生效。
 Foxglove 导航接口通过真实 `NavigateToPose` 测试 action server 验证：无定位时拒绝操作、
 点选位姿转 action、启用/关闭运动参数、定位丢失时取消目标。该测试不执行 Nav2 路径规划或运动。
+目标先选、运动后启用的回归已验证：禁用时等待超过 10 秒仍不发送 action，参数确认后才启动；
+启用被拒绝、取消、定位失效和等待期间目标格变为障碍均不会启动该目标。
+独立 ROS 模拟 Sport 端点验证速度转为限速后的 Move 1008 JSON、对应响应码显示、
+定位/点云失效 StopMove 和恢复后不重放失效期间速度；没有连接真实机器狗。
 SDK 配置检查使用上游提交 `b440609591a249e7bdd4bbc88e056a3660575447`。
 
 稠密配置另经 ROS 三维传感器建图/定位测试，100 万点 XYZ 消息通过实际 ROS CDR 序列化往返。
@@ -254,12 +258,18 @@ bash go2_3d/tools.sh inflation-5cm
 0.05 米小于当前外形的 0.23 米内切半径，Nav2 可能输出对应警告；这是本次明确选择的参数。
 全局规划的距离缓冲因此减少，DWB 的 `ObstacleFootprint` 仍检查真实外形；一条全局路径
 不能据此保证控制器可执行。当前实机日志已到达控制器，随后报 `Failed to make progress`。
-先启用运动，再发送新目标，避免运动禁用时也消耗进展检查的 10 秒时间。
+运动禁用时选目标会显示 `Goal queued`，直到启用参数确认后才发送 Nav2 action，
+等待不会消耗进展检查的 10 秒时间。先启用再选目标也可；已经失败的旧目标仍需重新选择。
+等待期间可重新点选替换目标；停止、取消或定位失效会清除暂存目标。
 
 `tools.sh navcheck X Y` 新增 `/cmd_vel_nav`、`/cmd_vel` 消息数/非零数/速度峰值及里程计位移。
 执行目标期间读取这些值，可区分控制器没有输出、速度平滑器链路没有输出，和命令已输出但
 机器狗未移动。该检查仍不发送任何目标或运动。实时参数工具通过真实 ROS 参数服务测试，
 包括回读 0.05 和参数拒绝处理；不是完整实机运动验证。
+`/control/status` 每 0.5 秒报告运动桥阻断原因、传感器/命令年龄、Move 请求数和最近速度；
+只报告与本桥请求 ID 对应的 Sport 响应 API/原始 code。没有响应本身不能证明运动失败，
+已发布 Move 请求或响应 code=0 也不能代替真实里程计/现场运动确认。
+`tools.sh enable/disable` 与 Foxglove 同走 `/control/enable`，使暂存目标启动与取消行为一致。
 
 ## 清理现有静态地图
 

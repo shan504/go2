@@ -9,7 +9,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile,ReliabilityPolicy,DurabilityPolicy,qos_profile_sensor_data
 from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import TransformStamped,Twist
-from std_msgs.msg import Bool,Header
+from std_msgs.msg import Bool,Header,String
 from sensor_msgs.msg import LaserScan,PointCloud2
 from tf2_ros import StaticTransformBroadcaster
 from navcheck import NavCheck,cell,connected
@@ -23,6 +23,8 @@ retained=QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
 map_pub=source.create_publisher(OccupancyGrid,'/map',retained)
 local_pub=source.create_publisher(OccupancyGrid,'/local_costmap/costmap',retained)
 valid_pub=source.create_publisher(Bool,'/localization/valid',10)
+control_pub=source.create_publisher(String,'/control/status',retained)
+control_pub.publish(String(data='gate=waiting for fresh /cmd_vel; Move_requests=0'))
 scan_pub=source.create_publisher(LaserScan,'/scan',qos_profile_sensor_data)
 cloud_pub=source.create_publisher(PointCloud2,'/point_cloud2',qos_profile_sensor_data)
 nav_velocity=source.create_publisher(Twist,'/cmd_vel_nav',10)
@@ -69,6 +71,7 @@ print(summary)
 assert node.latest['/map'].header.frame_id=='map'
 assert node.latest['/local_costmap/costmap'].header.frame_id=='odom'
 assert node.latest['/localization/valid'].data is True
+assert '/control/status: gate=waiting for fresh /cmd_vel; Move_requests=0' in summary
 assert 'Robot in map: xyz=[0.7, 0.25, 0.0]' in summary
 assert 'robot cell=(1, 0) value=0: free' in summary
 assert 'robot cell=(0, 0) value=0: free' in summary

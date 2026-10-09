@@ -15,6 +15,8 @@ from rclpy.qos import QoSProfile,ReliabilityPolicy,DurabilityPolicy
 from tf2_ros import TransformBroadcaster
 from std_msgs.msg import Header
 from std_msgs.msg import Bool,String
+from std_msgs.msg import Empty
+from rcl_interfaces.msg import SetParametersResult
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
 from operator_bridge import Operator
 from geometry import grid_cell
@@ -38,10 +40,15 @@ class TestEndpoints(Node):
         self.goals, self.cancels = 0,0
         self.last_goal = None
         self.abort_goal = False
+        self.reject_enable = False
+        self.add_on_set_parameters_callback(lambda parameters: SetParametersResult(
+            successful=not (self.reject_enable and any(p.name=='enable_control' and p.value for p in parameters)),
+            reason='test bridge refuses enable' if self.reject_enable else ''))
         self.operator_status = ''
         self.pub = self.create_publisher(Bool,'/localization/valid',1)
         self.enable = self.create_publisher(Bool,'/control/enable',1)
         self.goal = self.create_publisher(PoseStamped,'/goal_pose',1)
+        self.cancel = self.create_publisher(Empty,'/navigation/cancel',1)
         self.tf = TransformBroadcaster(self)
         self.grids = {}
         retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -101,7 +108,8 @@ if __name__ == '__main__':
     spinner = threading.Thread(target=executor.spin,daemon=True)
     spinner.start()
     try:
-        wait_for(lambda: operator.valid_received is not None and operator.action.server_is_ready() and len(operator.grids)==3)
+        wait_for(lambda: operator.valid_received is not None and operator.action.server_is_ready() and
+                 operator.motion_state.service_is_ready() and len(operator.grids)==3)
         pose = PoseStamped()
         pose.header.frame_id = 'map'
         pose.pose.position.x = 1.0
@@ -154,6 +162,50 @@ if __name__ == '__main__':
         endpoints.enable.publish(Bool(data=False))
         wait_for(lambda: endpoints.cancels == 1 and operator.goal_handle is None)
         assert endpoints.get_parameter('enable_control').value is False
+        # Selecting first and enabling later must not consume progress time.
+        endpoints.goal.publish(pose)
+        wait_for(lambda: 'Goal queued' in endpoints.operator_status)
+        time.sleep(10.5)  # Longer than the real controller's 10-second allowance.
+        assert endpoints.goals==1,'Disabled motion still started the Nav2 action'
+        endpoints.reject_enable = True
+        endpoints.enable.publish(Bool(data=True))
+        wait_for(lambda: 'parameter accepted=False' in endpoints.operator_status)
+        assert endpoints.goals==1 and endpoints.get_parameter('enable_control').value is False
+        endpoints.reject_enable = False
+        endpoints.enable.publish(Bool(data=True))
+        wait_for(lambda: endpoints.goals==2 and operator.goal_handle is not None)
+        endpoints.enable.publish(Bool(data=False))
+        wait_for(lambda: endpoints.cancels==2 and operator.goal_handle is None)
+        # Cancelling a held waypoint must prevent a subsequent enable dispatch.
+        endpoints.goal.publish(pose)
+        wait_for(lambda: 'Goal queued' in endpoints.operator_status)
+        endpoints.cancel.publish(Empty())
+        wait_for(lambda: 'Queued navigation goal cancelled' in endpoints.operator_status)
+        endpoints.enable.publish(Bool(data=True))
+        wait_for(lambda: 'no active navigation goal' in endpoints.operator_status)
+        assert endpoints.goals==2
+        endpoints.enable.publish(Bool(data=False))
+        wait_for(lambda: endpoints.get_parameter('enable_control').value is False)
+        # Localization loss discards a held waypoint; it cannot silently resume.
+        endpoints.goal.publish(pose)
+        wait_for(lambda: 'Goal queued' in endpoints.operator_status)
+        endpoints.valid = False
+        wait_for(lambda: operator.waiting_goal is None and not operator.localized())
+        endpoints.valid = True
+        wait_for(operator.localized)
+        # Revalidate costmaps at dispatch, not only when the user first clicks.
+        endpoints.goal.publish(pose)
+        wait_for(lambda: 'Goal queued' in endpoints.operator_status)
+        _,grid = endpoints.grids['/global_costmap/costmap']
+        col,row = grid_cell(operator.grids['/global_costmap/costmap'][0],(1.0,0.0))
+        index = row*grid.info.width+col
+        grid.data[index] = 100
+        wait_for(lambda: operator.grids['/global_costmap/costmap'][0].data[index]==100)
+        endpoints.enable.publish(Bool(data=True))
+        wait_for(lambda: 'Queued goal rejected on start' in endpoints.operator_status)
+        assert endpoints.goals==2
+        grid.data[index] = 0
+        wait_for(lambda: operator.grids['/global_costmap/costmap'][0].data[index]==0)
         # A distant map goal may lie beyond the rolling local window.
         _,local = endpoints.grids['/local_costmap/costmap']
         local.info.width = local.info.height = 10
@@ -161,18 +213,18 @@ if __name__ == '__main__':
         local.data = [0]*100
         wait_for(lambda: operator.grids['/local_costmap/costmap'][0].info.width==10)
         endpoints.goal.publish(pose)
-        wait_for(lambda: endpoints.goals == 2 and operator.goal_handle is not None)
+        wait_for(lambda: endpoints.goals == 3 and operator.goal_handle is not None)
         endpoints.valid = False
-        wait_for(lambda: endpoints.cancels == 2 and operator.goal_handle is None)
+        wait_for(lambda: endpoints.cancels == 3 and operator.goal_handle is None)
         endpoints.valid = True
         wait_for(operator.localized)
         endpoints.abort_goal = True
         endpoints.goal.publish(pose)
-        wait_for(lambda: endpoints.goals==3 and operator.last_goal_status==6 and operator.goal_handle is None)
+        wait_for(lambda: endpoints.goals==4 and operator.last_goal_status==6 and operator.goal_handle is None)
         endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: 'previous goal failed; fix route and send a new goal' in endpoints.operator_status)
-        assert endpoints.goals==3,'Enabling motion retried an aborted goal'
-        print('PASS Nav2 gateway: frame/map/TF checks, fixed-map action, enable/cancel; failed-goal enable explains no retry')
+        assert endpoints.goals==4,'Enabling motion retried an aborted goal'
+        print('PASS Nav2 gateway: disabled waypoint held >10s, confirmed enable dispatch, refusal/cancel/localization/revalidation, fixed-map action and no failed-goal retry')
     finally:
         executor.shutdown()
         spinner.join(timeout=3)

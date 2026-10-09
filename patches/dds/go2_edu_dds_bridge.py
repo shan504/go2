@@ -112,19 +112,24 @@ class Go2EduBridge(Node):
                     for t in (self.odom_received, self.cloud_received))
         action, command = self.gate.poll(now, fresh)
         if action == "move":
-            req = Request()
-            req.header.identity.id = time.time_ns()
-            req.header.identity.api_id = 1008
-            req.parameter = json.dumps(dict(zip(("x", "y", "z"), command)))
-            self.request_pub.publish(req)
+            self.send_move(command)
         elif action == "stop":
             self.send_stop()
+
+    def send_move(self, command):
+        req = Request()
+        req.header.identity.id = time.time_ns()
+        req.header.identity.api_id = 1008
+        req.parameter = json.dumps(dict(zip(("x", "y", "z"), command)))
+        self.request_pub.publish(req)
+        return req.header.identity.id
 
     def send_stop(self):
         req = Request()
         req.header.identity.id = time.time_ns()
         req.header.identity.api_id = 1003
         self.request_pub.publish(req)
+        return req.header.identity.id
 
 
 def main():
