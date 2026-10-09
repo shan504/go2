@@ -69,7 +69,7 @@ assert 'robot cell=(1, 0) value=0: free' in summary
 assert 'robot cell=(0, 0) value=0: free' in summary
 assert 'goal cell=(4, 1) value=0: free' in summary
 assert 'goal cell=(3, 1) value=0: free' in summary
-assert summary.count('NO: disconnected at cell-center level')==2
+assert summary.count('  connectivity: NO: disconnected at cell-center level')==2
 assert 'closest lethal cell to goal:' in summary
 assert 'at scan stamp+0.05s=True' in summary
 assert 'finite_returns=2' in summary

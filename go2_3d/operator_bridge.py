@@ -28,6 +28,7 @@ class Operator(Node):
         self.goal_pending = False
         self.cancel_requested = False
         self.cancelling = False
+        self.last_goal_status = None
         self.grids = {}
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer,self)
@@ -96,7 +97,11 @@ class Operator(Node):
         def done(result):
             try:
                 results = result.result().results
-                self.report('Motion enable=%s; parameter accepted=%s' % (message.data,all(r.successful for r in results)))
+                text = 'Motion enable=%s; parameter accepted=%s' % (message.data,all(r.successful for r in results))
+                if message.data and self.goal_handle is None and not self.goal_pending:
+                    text += ('; previous goal failed; fix route and send a new goal' if self.last_goal_status==6
+                             else '; no active navigation goal; publish /goal_pose to start')
+                self.report(text)
             except Exception as error:
                 self.report(f'Motion parameter failed: {error}')
         future.add_done_callback(done)
@@ -193,6 +198,7 @@ class Operator(Node):
                 self.report('Nav2 rejected goal')
                 return
             self.goal_handle = handle
+            self.last_goal_status = None
             handle.get_result_async().add_done_callback(self.goal_result)
             self.report('Nav2 accepted goal')
             if self.cancel_requested or not self.localized():
@@ -202,7 +208,12 @@ class Operator(Node):
 
     def goal_result(self,future):
         try:
-            self.report(f'Nav2 goal completed: action status={future.result().status}')
+            status = future.result().status
+            self.last_goal_status = status
+            text = f'Nav2 goal completed: action status={status}'
+            if status==6:
+                text += ' (ABORTED); no active goal; enabling motion does not retry the failed goal'
+            self.report(text)
         except Exception as error:
             self.report(f'Nav2 result failed: {error}')
         self.goal_handle = None

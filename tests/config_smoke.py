@@ -22,7 +22,7 @@ for name in ('local_costmap','global_costmap'):
     assert cfg['obstacle_layer']['scan']['topic'] == '/scan'
     assert cfg['obstacle_layer']['scan']['inf_is_valid'] is False
     assert 'voxel_layer' not in cfg['plugins']
-    assert cfg['inflation_layer']['inflation_radius'] == 0.28
+    assert cfg['inflation_layer']['inflation_radius'] == 0.25
     assert cfg['inflation_layer']['cost_scaling_factor'] == 12.0
     assert cfg['footprint'] == '[[-0.40,-0.22],[-0.40,0.22],[0.40,0.22],[0.40,-0.22]]'
     assert cfg['footprint_padding'] == 0.01

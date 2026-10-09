@@ -14,7 +14,7 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.qos import QoSProfile,ReliabilityPolicy,DurabilityPolicy
 from tf2_ros import TransformBroadcaster
 from std_msgs.msg import Header
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool,String
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
 from operator_bridge import Operator
 from geometry import grid_cell
@@ -37,12 +37,15 @@ class TestEndpoints(Node):
         self.tf_enabled = True
         self.goals, self.cancels = 0,0
         self.last_goal = None
+        self.abort_goal = False
+        self.operator_status = ''
         self.pub = self.create_publisher(Bool,'/localization/valid',1)
         self.enable = self.create_publisher(Bool,'/control/enable',1)
         self.goal = self.create_publisher(PoseStamped,'/goal_pose',1)
         self.tf = TransformBroadcaster(self)
         self.grids = {}
         retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String,'/operator/status',lambda m: setattr(self,'operator_status',m.data),retained)
         for topic in ('/map','/global_costmap/costmap','/local_costmap/costmap'):
             publisher = self.create_publisher(OccupancyGrid,topic,retained)
             grid = OccupancyGrid()
@@ -75,6 +78,9 @@ class TestEndpoints(Node):
     def execute(self,handle):
         self.goals += 1
         self.last_goal = handle.request.pose
+        if self.abort_goal:
+            handle.abort()
+            return NavigateToPose.Result()
         deadline = time.monotonic()+15
         while time.monotonic() < deadline:
             if handle.is_cancel_requested:
@@ -158,7 +164,15 @@ if __name__ == '__main__':
         wait_for(lambda: endpoints.goals == 2 and operator.goal_handle is not None)
         endpoints.valid = False
         wait_for(lambda: endpoints.cancels == 2 and operator.goal_handle is None)
-        print('PASS Nav2 gateway: old body-frame goal rejected, map/clearance blocked goals rejected, fixed-map action, enable/disable and cancel on localization loss')
+        endpoints.valid = True
+        wait_for(operator.localized)
+        endpoints.abort_goal = True
+        endpoints.goal.publish(pose)
+        wait_for(lambda: endpoints.goals==3 and operator.last_goal_status==6 and operator.goal_handle is None)
+        endpoints.enable.publish(Bool(data=True))
+        wait_for(lambda: 'previous goal failed; fix route and send a new goal' in endpoints.operator_status)
+        assert endpoints.goals==3,'Enabling motion retried an aborted goal'
+        print('PASS Nav2 gateway: frame/map/TF checks, fixed-map action, enable/cancel; failed-goal enable explains no retry')
     finally:
         executor.shutdown()
         spinner.join(timeout=3)

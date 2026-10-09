@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Read-only Nav2 grid/TF diagnostics; never sends a goal or motion request."""
 import argparse
-from collections import deque
 import math
 from pathlib import Path
 import time
@@ -18,6 +17,7 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener, TransformException
 from geometry import pose_matrix, cloud_xyz, transform_points, grid_cell
 from ground import heights
+from route_analysis import connected,inscribed_radius,static_clearance
 
 
 def cell(grid, xy):
@@ -31,29 +31,6 @@ def label(value):
     if value >= 99:
         return 'inscribed/lethal (blocked)'
     return 'free' if value == 0 else 'graded inflation cost'
-
-
-def connected(data, start, goal):
-    """Cell-center connectivity only, not a footprint-aware Nav2 plan."""
-    if start is None or goal is None:
-        return 'outside grid'
-    if data.size > 500_000:
-        return 'not checked: grid exceeds 500000 cells'
-    if not 0 <= data[goal[1],goal[0]] < 99:
-        return 'NO: goal cell blocked'
-    visited = np.zeros(data.shape,dtype=bool)
-    visited[start[1],start[0]] = True
-    pending = deque([start])
-    while pending:
-        x,y = pending.popleft()
-        if (x,y) == goal:
-            return 'YES (cell centers only; not a Nav2 plan)'
-        for nx,ny in ((x-1,y),(x+1,y),(x,y-1),(x,y+1)):
-            if (0 <= nx < data.shape[1] and 0 <= ny < data.shape[0]
-                    and not visited[ny,nx] and 0 <= data[ny,nx] < 99):
-                visited[ny,nx] = True
-                pending.append((nx,ny))
-    return 'NO: disconnected at cell-center level'
 
 
 class NavCheck(Node):
@@ -78,6 +55,8 @@ class NavCheck(Node):
     def summary(self):
         lines = ['READ-ONLY Nav2 check; no goal, parameter or motion writes',
                  f'Goal in map: {self.goal}']
+        config = None
+        routes = {}
         config_path = Path('/runtime/config/nav2_3d.yaml')
         if config_path.exists():
             config = yaml.safe_load(config_path.read_text())
@@ -137,9 +116,25 @@ class NavCheck(Node):
                         distance = float(np.sqrt(squared.min())*grid.info.resolution)
                         lines.append(f'  closest lethal cell to goal: cell=({col}, {row}) '
                                      f'center_distance={distance:.3f}m (quantized grid distance)')
-                lines.append('  connectivity: '+connected(data,start,target))
+                routes[topic] = connected(data,start,target)
+                lines.append('  connectivity: '+routes[topic])
+                if topic=='/map' and config and data.size<=500_000:
+                    p=config['global_costmap']['global_costmap']['ros__parameters']
+                    footprint=yaml.safe_load(p['footprint']) if isinstance(p['footprint'],str) else p['footprint']
+                    radius=inscribed_radius(footprint,p.get('footprint_padding',0.0))
+                    band=static_clearance(data,grid.info.resolution,radius)
+                    routes['static_clearance']=connected(band,start,target)
+                    lines.append(f'  STATIC-ONLY inscribed clearance radius={radius:.3f}m connectivity: '
+                                 +routes['static_clearance'])
             except (TransformException,ValueError) as error:
                 lines.append(f'  cell checks unavailable: {error}')
+        if routes.get('/global_costmap/costmap','').startswith('NO'):
+            if routes.get('static_clearance','').startswith('YES'):
+                lines.append('ROUTE FAILURE: static map with body clearance connects, live global costmap does not; inspect global obstacle marks and their clearing.')
+            elif routes.get('static_clearance','').startswith('NO'):
+                lines.append('ROUTE FAILURE: static obstacles + body clearance + unknown cells already disconnect the route; inspect grid evidence/width before changing live obstacle layers.')
+            elif routes.get('/map','').startswith('NO'):
+                lines.append('ROUTE FAILURE: static navigation grid itself disconnects the route.')
         scan = self.latest.get('/scan')
         if scan:
             ranges = np.asarray(scan.ranges)

@@ -52,7 +52,9 @@ def main():
             'raytrace_min_range':0.35,'raytrace_max_range':15.0,
             'obstacle_min_range':0.35,'obstacle_max_range':12.0}}
         params['inflation_layer'] = {'plugin':'nav2_costmap_2d::InflationLayer',
-                                    'inflation_radius':0.28,'cost_scaling_factor':12.0}
+                                    # Padded half-width 0.23m plus 0.02m soft
+                                    # buffer. 0.02m total would omit body clearance.
+                                    'inflation_radius':0.25,'cost_scaling_factor':12.0}
     nav['global_costmap']['global_costmap']['ros__parameters']['track_unknown_space'] = True
     nav['planner_server']['ros__parameters']['GridBased'] = {
         'plugin':'nav2_navfn_planner/NavfnPlanner','tolerance':0.25,

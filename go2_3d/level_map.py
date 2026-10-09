@@ -9,9 +9,10 @@ import shutil
 import numpy as np
 import open3d as o3d
 import yaml
-from geometry import ObservedGrid,transform_points
+from geometry import ObservedGrid
 from ground import estimate_ground,heights,level_transform
-from repair_map import grid_stats,load_old_free
+from repair_map import grid_stats,repair
+from free_space import resample_free
 
 
 def level(root, resolution=0.05):
@@ -21,6 +22,10 @@ def level(root, resolution=0.05):
     source = (root/'latest').resolve(strict=True)
     metadata = yaml.safe_load((source/'metadata.yaml').read_text())
     if metadata.get('ground_aligned') and np.isclose(metadata['parameters']['grid_resolution'],resolution):
+        if metadata.get('free_area_version',0)<2:
+            # Keep the already leveled PCD byte-for-byte; recover coarse free
+            # areas from its retained predecessor in the same coordinates.
+            return repair(root)
         print(f'ALREADY LEVELED: {source}; latest unchanged',flush=True)
         return source
     pc = o3d.io.read_point_cloud(str(source/'map.pcd'))
@@ -37,18 +42,8 @@ def level(root, resolution=0.05):
     body_height = metadata.get('body_height_above_ground',float(transform[2,3]))
     if not 0.1 < body_height < 1.0:
         raise ValueError('Cannot infer standing body height; original retained')
-    # Archive cells are expressed in the original grid lattice. Lift their
-    # centres onto the old floor and transform them, rather than reusing the
-    # integer indices at another resolution or clearing unseen subcells.
-    old_grid = ObservedGrid(params.get('grid_resolution',0.10))
-    load_old_free(source,old_grid)
     grid = ObservedGrid(resolution)
-    if old_grid.free:
-        xy = (np.asarray(list(old_grid.free),dtype=float)+0.5)*old_grid.resolution
-        plane = np.asarray(ground['plane'],dtype=float)
-        z = -(xy@plane[:2]+plane[3])/plane[2]
-        free = transform_points(np.column_stack((xy,z)),transform)
-        grid.free.update(map(tuple,np.floor(free[:,:2]/resolution).astype(int)))
+    grid.free = resample_free(source,ground,transform,resolution,grid.max_cells)
     destination = root/('leveled-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
     destination.mkdir()
     link = root/'.latest-level'
@@ -64,6 +59,7 @@ def level(root, resolution=0.05):
         params.update(grid_resolution=float(resolution),floor_z=0.)
         stats = dict(before=grid_stats(source),after=grid_stats(destination))
         metadata.update(parameters=params,ground_model=model,ground_aligned=True,
+                        free_area_version=2,
                         body_height_above_ground=float(body_height),point_count=len(leveled),
                         leveled_from=str(source),map_from_previous_map=transform.tolist(),
                         level_grid_stats=stats,

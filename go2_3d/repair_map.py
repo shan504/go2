@@ -10,6 +10,7 @@ import open3d as o3d
 import yaml
 from geometry import ObservedGrid
 from ground import estimate_ground
+from free_space import restore_ancestor_free
 
 
 def grid_stats(directory):
@@ -53,11 +54,13 @@ def repair(root):
     try:
         grid = ObservedGrid(p.get('grid_resolution',0.10))
         load_old_free(source,grid)
+        restored = restore_ancestor_free(root,metadata,grid) if metadata.get('ground_aligned') else 0
         grid.export(points,destination,p.get('floor_z',-0.30),p.get('obstacle_min_height',0.10),
                     p.get('obstacle_max_height',1.5),ground)
         shutil.copy2(source/'map.pcd',destination/'map.pcd')
         stats = dict(before=grid_stats(source),after=grid_stats(destination))
         metadata.update(ground_model=ground,repaired_from=str(source),repair_grid_stats=stats,
+                        free_area_version=2,restored_free_cells=restored,
                         repair='ground-relative projection and observed-floor free cells; original XYZ preserved')
         (destination/'metadata.yaml').write_text(yaml.safe_dump(metadata))
         link = root/'.latest-repair'
@@ -69,7 +72,8 @@ def repair(root):
         # Never publish a partial map as latest. Keep the old directory intact.
         shutil.rmtree(destination)
         raise
-    print(f'REPAIRED navigation grid: {destination}\nOriginal retained: {source}\nGround: {ground}\nGrid cells: {stats}',flush=True)
+    print(f'REPAIRED navigation grid: {destination}\nOriginal retained: {source}\nGround: {ground}\n'
+          f'Restored retained free-area cells: {restored}\nGrid cells: {stats}',flush=True)
     return destination
 
 

@@ -180,7 +180,7 @@ GICP 无效或超过 1 秒未完成匹配、运动命令超过 0.5 秒未更新�
 
 ## 已验证与尚待验证
 
-云端 x86_64：22 项真实 GICP/几何/PCD/地面/栅格/静止跳变及校正滤波测试，使用 Open3D 0.19 和 Ubuntu
+云端 x86_64：27 项真实 GICP/几何/PCD/地面/栅格/静止跳变及校正滤波测试，使用 Open3D 0.19 和 Ubuntu
 Jammy 的 0.14 均通过；ROS2 Humble 模拟三维传感器测试通过建图、TF、Foxglove 保存接口、
 地图重载、初始位姿定位与传感器丢失失效检查。原 DDS 包 4 项测试及 SDK 配置生成检查通过。
 定位新增 5 厘米细 GICP 和仅针对已接受校正的滤波；模拟测试确认错误参考系不会初始化，
@@ -195,7 +195,8 @@ SDK 配置检查使用上游提交 `b440609591a249e7bdd4bbc88e056a3660575447`。
 用户后续实机诊断确认细 GICP 有效，fitness=1.000、RMSE=0.025m；失败目标在全局和局部
 代价地图均为 99，静态地图为自由单元。RMSE 是匹配残差，不代表真实定位误差。
 **导航路径与真实运动仍待现场验收。**
-局部地图为 4×4 米、5 厘米分辨率；膨胀半径参数 0.28 米、衰减系数 12，保留外形碰撞检查。
+局部地图为 4×4 米、5 厘米分辨率；膨胀半径参数 0.25 米、衰减系数 12，保留外形碰撞检查。
+这是 0.23 米带 padding 的内切半径加 0.02 米软缓冲，总半径不是 0.02 米。
 接受的校正在有效期内按真实里程计时间最多 20 Hz 发布 TF；ROS 测试验证匹配间持续更新，
 拒绝匹配/数据过期后停止刷新。Humble MessageFilter 测试复现延迟 TF 的激光超时丢弃，
 连续 TF 下测试扫描全部通过；该修复还需实机检查。
@@ -214,6 +215,13 @@ ROS 测试验证数值初始位姿走真实 GICP，Nav2 就绪节点在有效标
 这验证了坐标和初始化契约，**不是实机传感器回放，也不是实际路径/运动验证**。
 新场地地图按上面的建图、保存、level-map、定位流程现场验收。
 
+细栅格转换已修正：旧自由单元按已知面积转移，不再只转移中心子格；未知/障碍不当作自由区域。
+旧 `level-map` 图可在停止容器后执行 `tools.sh repair-map`，从保留的前一张粗栅格恢复自由区域，
+当前 PCD 字节和定位坐标保持不变。稀疏地面回归由旧版的 200 个自由子格恢复为 800 个；
+直接编译未修改的 Humble NavFn A* 核心复现旧图无路径、验证修复后有路径，保留 0.23 米内切净空。
+此测试不运行完整 planner_server、控制器或真实运动。`navcheck` 另比较静态内切净空与实时全局地图，
+区分地图/净空断路和额外实时障碍标记断路。目标中心为自由格不代表整条路线可达。
+
 本地算法测试：
 
 ```bash
@@ -229,4 +237,12 @@ TF 过滤回归需 Humble 的 rclcpp、tf2_ros、sensor_msgs 和 message_filters
 cmake -S tests/tf_filter -B /tmp/go2-tf-filter-build
 cmake --build /tmp/go2-tf-filter-build -j2
 /tmp/go2-tf-filter-build/filter_check
+```
+
+细栅格断路的原生 NavFn 回归（需未修改的 Humble `nav2_navfn_planner` 源目录及 rclcpp）：
+
+```bash
+cmake -S tests/navfn -B /tmp/go2-navfn-build -DGO2_NAVFN_SOURCE=/path/to/navigation2/nav2_navfn_planner
+cmake --build /tmp/go2-navfn-build -j2
+python3 tests/navfn_smoke.py /tmp/go2-navfn-build/grid_plan
 ```

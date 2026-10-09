@@ -18,6 +18,9 @@
 | 二维栅格 | `/map`，按需开启透明度，避免遮住三维点云 |
 | 障碍代价地图 | `/local_costmap/costmap`、`/global_costmap/costmap`，按需开启 |
 
+检查可通行栅格时，暂时关闭该面板中的 `/map_cloud`、`/registered_cloud`、`/point_cloud2`，
+只显示 `/map` 与代价地图。按 z 着色的蓝色点云会遮住白色格子，颜色不是 Nav2 是否可通行的判据。
+
 观察稳定的三维场景时，先只开启 `/registered_cloud` 和 `/map_cloud`。
 这两个话题保留 XYZ，颜色字段选 `z`（高度）；它们没有 `intensity` 字段。
 `/registered_cloud` 使用通过 GICP 检查后的位姿（定位时包含校正滤波），与发布的 TF 一致，只在配准通过时更新；`/map_cloud` 是保存到 PCD 的地图。
