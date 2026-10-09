@@ -32,7 +32,7 @@ def wait_for(predicate,seconds=10):
 
 
 class TestEndpoints(Node):
-    def __init__(self):
+    def __init__(self,start_action=True):
         super().__init__('go2_edu_dds_bridge')
         self.declare_parameter('enable_control',False)
         self.valid = False
@@ -50,6 +50,9 @@ class TestEndpoints(Node):
         self.goal = self.create_publisher(PoseStamped,'/goal_pose',1)
         self.cancel = self.create_publisher(Empty,'/navigation/cancel',1)
         self.tf = TransformBroadcaster(self)
+        self.startup = self.create_publisher(String,'/navigation/startup_status',
+            QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.startup.publish(String(data='Nav2 deferred awaiting TF'))
         self.grids = {}
         retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String,'/operator/status',lambda m: setattr(self,'operator_status',m.data),retained)
@@ -65,6 +68,10 @@ class TestEndpoints(Node):
             self.grids[topic] = (publisher,grid)
         self.create_timer(0.05,lambda: self.pub.publish(Bool(data=self.valid)))
         self.create_timer(0.05,self.sensors)
+        if start_action:
+            self.start_action()
+
+    def start_action(self):
         self.server = ActionServer(self,NavigateToPose,'/navigate_to_pose',
             execute_callback=self.execute,cancel_callback=lambda request: CancelResponse.ACCEPT,
             callback_group=ReentrantCallbackGroup())
@@ -101,14 +108,14 @@ class TestEndpoints(Node):
 
 if __name__ == '__main__':
     rclpy.init(args=['--ros-args','-p','mode:=navigation'])
-    operator, endpoints = Operator(),TestEndpoints()
+    operator, endpoints = Operator(),TestEndpoints(start_action=False)
     executor = MultiThreadedExecutor(num_threads=5)
     executor.add_node(operator)
     executor.add_node(endpoints)
     spinner = threading.Thread(target=executor.spin,daemon=True)
     spinner.start()
     try:
-        wait_for(lambda: operator.valid_received is not None and operator.action.server_is_ready() and
+        wait_for(lambda: operator.valid_received is not None and
                  operator.motion_state.service_is_ready() and len(operator.grids)==3)
         pose = PoseStamped()
         pose.header.frame_id = 'map'
@@ -122,6 +129,16 @@ if __name__ == '__main__':
         endpoints.valid = True
         wait_for(operator.localized)
         wait_for(lambda: operator.buffer.can_transform('map','base_footprint',rclpy.time.Time()))
+        # A healthy localization does not mean Nav2 itself has started.
+        endpoints.enable.publish(Bool(data=True))
+        wait_for(lambda: 'Enable rejected: Nav2 NavigateToPose action unavailable' in endpoints.operator_status)
+        assert 'Nav2 deferred awaiting TF' in endpoints.operator_status
+        assert endpoints.get_parameter('enable_control').value is False
+        endpoints.goal.publish(pose)
+        wait_for(lambda: 'Goal rejected: Nav2 NavigateToPose action unavailable' in endpoints.operator_status)
+        assert endpoints.goals==0
+        endpoints.start_action()
+        wait_for(operator.action.server_is_ready)
         # An old body-relative pose must not bypass the gateway into Nav2.
         pose.header.frame_id = 'base_link'
         pose.header.stamp.sec = 1

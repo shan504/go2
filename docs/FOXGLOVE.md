@@ -175,11 +175,14 @@ Nav2 保持未激活，直到 GICP 与新鲜 TF 就绪；查看 `/navigation/sta
 在 Foxglove 的 `map` 参考系下显示。先使定位有效，再在容器 shell 中检查：
 
 ```bash
-ros2 lifecycle get /controller_server
-ros2 lifecycle get /planner_server
+ros2 lifecycle get --no-daemon /controller_server
+ros2 lifecycle get --no-daemon /planner_server
 ```
 
 都应为 `active`；若定位已有效而代价地图仍不可见，保留生命周期输出并运行只读诊断。
+`tools.sh navcheck X Y` 也直接查询七个 Nav2 节点的生命周期服务，并读取
+`/navigation/startup_status`，不依赖 ROS CLI 后台进程。
+`xmlrpc.client.Fault ... !rclpy.ok()` 是 CLI 后台进程错误，不能用它判断 Nav2 状态。
 不要发布固定 `map → odom` 绕过 GICP 来消除等待提示。
 
 等待 `/localization/valid` 连续为 `true`，查看 `/localization/status` 的 fitness/RMSE，
@@ -215,6 +218,8 @@ Nav2 原生的 `/goal_pose` 订阅在启动组内重映射，避免绕过操作�
 有进行中的目标时先取消，等待 action 完成，再选新目标。
 暂存但尚未启动的目标可以重新点选替换；停止、取消或定位丢失会清除暂存目标。
 `tools.sh enable/disable` 也通过相同操作节点，支持上述顺序。
+Nav2 action 不可用时，启用与目标操作会拒绝并附上最新启动状态；仅定位有效不足以启动导航。
+启动状态现在分别报告等待定位、TF/时间戳、持续就绪和生命周期管理服务。
 
 “启用运动”只是允许运动桥执行 Nav2 的速度命令，不会自己产生前进命令。
 `GridBased failed to generate a valid path` 表示规划失败。

@@ -15,6 +15,7 @@ class Nav2Ready(Node):
         super().__init__('go2_nav2_ready')
         self.valid,self.received,self.ready_since = False,None,None
         self.attempted,self.started = False,False
+        self.wait_reason,self.wait_reported = None,0.0
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer,self)
         self.client = self.create_client(ManageLifecycleNodes,'/lifecycle_manager_navigation/manage_nodes')
@@ -31,24 +32,39 @@ class Nav2Ready(Node):
     def on_valid(self,msg):
         self.valid,self.received = msg.data,time.monotonic()
 
+    def waiting(self,reason,text):
+        now = time.monotonic()
+        if reason != self.wait_reason or now-self.wait_reported >= 5.0:
+            self.wait_reason,self.wait_reported = reason,now
+            self.report(text)
+
     def tick(self):
         if self.attempted:
             return
         now = time.monotonic()
         ready = self.valid and self.received is not None and now-self.received<0.5
+        reason,text = 'localization','Nav2 waiting: live accepted GICP localization required'
         if ready:
             try:
                 pose = self.buffer.lookup_transform('map','base_footprint',Time())
                 stamp = Time.from_msg(pose.header.stamp)
-                ready = 0 <= (self.get_clock().now()-stamp).nanoseconds/1e9<0.3
-            except TransformException:
+                age = (self.get_clock().now()-stamp).nanoseconds/1e9
+                ready = 0 <= age<0.3
+                reason,text = 'tf_age',f'Nav2 waiting: map -> base_footprint TF age={age:.3f}s; requires 0..0.3s'
+            except TransformException as error:
                 ready = False
+                reason,text = 'tf_missing',f'Nav2 waiting: map -> base_footprint TF unavailable: {error}'
         if not ready:
             self.ready_since = None
+            self.waiting(reason,text)
             return
         if self.ready_since is None:
             self.ready_since = now
-        if now-self.ready_since<0.5 or not self.client.service_is_ready():
+        if now-self.ready_since<0.5:
+            self.waiting('settling','Nav2 waiting: GICP/TF must remain ready for 0.5s')
+            return
+        if not self.client.service_is_ready():
+            self.waiting('manager','Nav2 waiting: /lifecycle_manager_navigation/manage_nodes service unavailable')
             return
         self.attempted = True
         request = ManageLifecycleNodes.Request()

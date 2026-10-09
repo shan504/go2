@@ -15,6 +15,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan, PointCloud2
 from std_msgs.msg import Bool, String
+from lifecycle_msgs.srv import GetState
 from tf2_ros import Buffer, TransformListener, TransformException
 from geometry import pose_matrix, cloud_xyz, transform_points, grid_cell
 from ground import heights
@@ -39,6 +40,11 @@ class NavCheck(Node):
         super().__init__('go2_nav_readonly_check')
         self.goal, self.latest, self.received = goal, {}, {}
         self.velocity_stats, self.first_odom = {}, None
+        self.lifecycle_states,self.lifecycle_pending = {},{}
+        self.lifecycle_clients = {name:self.create_client(GetState,f'/{name}/get_state') for name in
+                                  ('controller_server','smoother_server','planner_server','behavior_server',
+                                   'bt_navigator','waypoint_follower','velocity_smoother')}
+        self.create_timer(0.5,self.read_lifecycle)
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer,self)
         retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
@@ -47,7 +53,8 @@ class NavCheck(Node):
                  '/local_costmap/costmap':OccupancyGrid,'/scan':LaserScan,
                  '/point_cloud2':PointCloud2,
                  '/localization/valid':Bool,'/localization/status':String,
-                 '/operator/status':String, '/control/status':String, '/cmd_vel_nav':Twist, '/cmd_vel':Twist,
+                 '/operator/status':String, '/control/status':String, '/navigation/startup_status':String,
+                 '/cmd_vel_nav':Twist, '/cmd_vel':Twist,
                  '/odom':Odometry}
         for topic,kind in kinds.items():
             def receive(msg,topic=topic):
@@ -61,7 +68,23 @@ class NavCheck(Node):
                 if isinstance(msg, Odometry) and self.first_odom is None:
                     self.first_odom = np.array([msg.pose.pose.position.x,msg.pose.pose.position.y])
             self.create_subscription(kind,topic,receive,
-                                     retained if kind is OccupancyGrid or topic in ('/operator/status','/control/status') else qos_profile_sensor_data)
+                                     retained if kind is OccupancyGrid or topic in
+                                     ('/operator/status','/control/status','/navigation/startup_status') else qos_profile_sensor_data)
+
+    def read_lifecycle(self):
+        for name,client in self.lifecycle_clients.items():
+            if name in self.lifecycle_pending or not client.service_is_ready():
+                continue
+            future = client.call_async(GetState.Request())
+            self.lifecycle_pending[name] = future
+            def done(result,name=name):
+                self.lifecycle_pending.pop(name,None)
+                try:
+                    state = result.result().current_state
+                    self.lifecycle_states[name] = (state.id,state.label,time.monotonic())
+                except Exception:
+                    self.lifecycle_states.pop(name,None)
+            future.add_done_callback(done)
 
     def summary(self):
         lines = ['READ-ONLY Nav2 check; no goal, parameter or motion writes',
@@ -79,10 +102,15 @@ class NavCheck(Node):
                              f'padding={p.get("footprint_padding")}')
                 lines.append(f'  plugin order={p["plugins"]}; denoise={p.get("denoise_layer", "MISSING")}')
             lines.append('Global StaticLayer resizes to the saved map; actual grid dimensions follow below.')
-        for topic in ('/localization/valid','/localization/status','/operator/status','/control/status'):
+        for topic in ('/localization/valid','/localization/status','/navigation/startup_status','/operator/status','/control/status'):
             msg = self.latest.get(topic)
             age = time.monotonic()-self.received[topic] if msg else math.inf
             lines.append(f'{topic}: {msg.data if msg else "NO MESSAGES"} receipt_age={age:.2f}s')
+        for name,client in self.lifecycle_clients.items():
+            state = self.lifecycle_states.get(name)
+            lines.append(f'/{name} lifecycle: '+
+                         (f'{state[1]} [{state[0]}] receipt_age={time.monotonic()-state[2]:.2f}s' if state else
+                          'NO RESPONSE' if client.service_is_ready() else 'SERVICE UNAVAILABLE'))
         for topic in ('/cmd_vel_nav','/cmd_vel'):
             stats = self.velocity_stats.get(topic)
             if stats:
@@ -104,6 +132,12 @@ class NavCheck(Node):
             lines.append(f'Robot in map: xyz={[round(t.x,3),round(t.y,3),round(t.z,3)]} yaw={math.degrees(yaw):.1f}deg')
         except TransformException as error:
             lines.append(f'TF map -> base_link: MISSING; initialize GICP first. {error}')
+        try:
+            footprint = self.buffer.lookup_transform('map','base_footprint',Time())
+            age = (self.get_clock().now()-Time.from_msg(footprint.header.stamp)).nanoseconds/1e9
+            lines.append(f'TF map -> base_footprint: host_age={age:.3f}s; startup_age_ready={0 <= age < 0.3}')
+        except TransformException as error:
+            lines.append(f'TF map -> base_footprint: MISSING; Nav2 startup deferred. {error}')
         for topic in ('/map','/global_costmap/costmap','/local_costmap/costmap'):
             grid = self.latest.get(topic)
             if grid is None:

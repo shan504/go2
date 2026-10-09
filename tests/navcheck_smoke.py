@@ -6,11 +6,13 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import QoSProfile,ReliabilityPolicy,DurabilityPolicy,qos_profile_sensor_data
 from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import TransformStamped,Twist
 from std_msgs.msg import Bool,Header,String
 from sensor_msgs.msg import LaserScan,PointCloud2
+from lifecycle_msgs.srv import GetState
 from tf2_ros import StaticTransformBroadcaster
 from navcheck import NavCheck,cell,connected
 from ros_cloud import xyz_message
@@ -25,6 +27,12 @@ local_pub=source.create_publisher(OccupancyGrid,'/local_costmap/costmap',retaine
 valid_pub=source.create_publisher(Bool,'/localization/valid',10)
 control_pub=source.create_publisher(String,'/control/status',retained)
 control_pub.publish(String(data='gate=waiting for fresh /cmd_vel; Move_requests=0'))
+startup_pub=source.create_publisher(String,'/navigation/startup_status',retained)
+startup_pub.publish(String(data='Nav2 lifecycle startup failed: controller_server'))
+def inactive(request,response):
+    response.current_state.id,response.current_state.label=1,'unconfigured'
+    return response
+source.create_service(GetState,'/controller_server/get_state',inactive)
 scan_pub=source.create_publisher(LaserScan,'/scan',qos_profile_sensor_data)
 cloud_pub=source.create_publisher(PointCloud2,'/point_cloud2',qos_profile_sensor_data)
 nav_velocity=source.create_publisher(Twist,'/cmd_vel_nav',10)
@@ -55,6 +63,9 @@ grid.header.frame_id='odom'
 local_pub.publish(grid)
 # Publish first, then subscribe: this exercises retained map QoS.
 node=NavCheck((2.25,0.75))
+executor=SingleThreadedExecutor()
+executor.add_node(source)
+executor.add_node(node)
 deadline=time.monotonic()+3
 while time.monotonic()<deadline:
     valid_pub.publish(Bool(data=True))
@@ -65,13 +76,17 @@ while time.monotonic()<deadline:
     scan=LaserScan(header=header,range_min=0.35,range_max=20.0,ranges=[0.5,1.0,float('inf')])
     scan_pub.publish(scan)
     cloud_pub.publish(xyz_message(header,np.array([[1.55,0.5,-0.18],[1.55,0.5,0.4],[8,8,0.3]])))
-    rclpy.spin_once(node,timeout_sec=0.1)
+    executor.spin_once(timeout_sec=0.1)
 summary=node.summary()
 print(summary)
 assert node.latest['/map'].header.frame_id=='map'
 assert node.latest['/local_costmap/costmap'].header.frame_id=='odom'
 assert node.latest['/localization/valid'].data is True
 assert '/control/status: gate=waiting for fresh /cmd_vel; Move_requests=0' in summary
+assert '/navigation/startup_status: Nav2 lifecycle startup failed: controller_server' in summary
+assert '/controller_server lifecycle: unconfigured [1]' in summary
+assert '/bt_navigator lifecycle: SERVICE UNAVAILABLE' in summary
+assert 'TF map -> base_footprint: MISSING; Nav2 startup deferred.' in summary
 assert 'Robot in map: xyz=[0.7, 0.25, 0.0]' in summary
 assert 'robot cell=(1, 0) value=0: free' in summary
 assert 'robot cell=(0, 0) value=0: free' in summary
@@ -100,5 +115,6 @@ assert cell(grid,(1.25,1.25))==(4,1)
 assert cell(grid,(9.0,9.0)) is None
 node.destroy_node()
 source.destroy_node()
+executor.shutdown()
 rclpy.shutdown()
 print('PASS real ROS retained grids, live status, map/odom target transform, blocked/connectivity checks and rotated origin')

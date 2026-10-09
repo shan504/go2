@@ -33,6 +33,7 @@ class Operator(Node):
         self.goal_generation = 0
         self.motion_generation = 0
         self.enable_query = None
+        self.startup_status = 'startup status not received'
         self.grids = {}
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer,self)
@@ -48,6 +49,8 @@ class Operator(Node):
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status = self.create_publisher(String,'/operator/status',retained)
         if self.mode == 'navigation':
+            self.create_subscription(String,'/navigation/startup_status',
+                lambda msg: setattr(self,'startup_status',msg.data),retained)
             for topic in ('/map','/global_costmap/costmap','/local_costmap/costmap'):
                 self.create_subscription(OccupancyGrid,topic,
                     lambda msg,topic=topic: self.grids.__setitem__(topic,(msg,time.monotonic())),retained)
@@ -106,6 +109,9 @@ class Operator(Node):
             self.on_cancel(Empty())
         if message.data and (self.mode != 'navigation' or not self.localized()):
             self.report('Enable rejected: navigation mode and live GICP localization required')
+            return
+        if enabled and not self.action.server_is_ready():
+            self.report(f'Enable rejected: Nav2 NavigateToPose action unavailable; {self.startup_status}')
             return
         if not self.parameters.service_is_ready():
             self.report('Motion bridge parameter service unavailable')
@@ -169,7 +175,7 @@ class Operator(Node):
             self.report('Goal rejected: cancel the current goal before selecting another')
             return
         if not self.action.server_is_ready():
-            self.report('Nav2 NavigateToPose action unavailable')
+            self.report(f'Goal rejected: Nav2 NavigateToPose action unavailable; {self.startup_status}')
             return
         try:
             self.validate_goal(message)

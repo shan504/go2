@@ -98,6 +98,9 @@ bash go2_3d/run.sh navigation dense 0 0 0
 数值参数为 `X Y YAW_DEGREES [Z]`，单位米、度；只提供提示，不会跳过 GICP 接受检查。
 Nav2 生命周期启动等待 GICP 连续有效和新鲜 `map → base_footprint`，不再提前激活并反复等待不存在的 map。
 `/navigation/startup_status` 显示等待、启动或失败原因。默认运动仍关闭。
+定位有效但代价地图/速度均无发布者时，先检查 Nav2 启动状态，而非继续点击启用。
+`tools.sh navcheck X Y` 直接读取七个 Nav2 生命周期服务及启动状态，绕过 ROS CLI daemon；
+Nav2 action 不可用时，操作节点拒绝启用并显示启动原因。
 
 旧图需要修复导航投影，先停止正在运行的导航终端，再运行：
 
