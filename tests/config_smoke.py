@@ -24,6 +24,10 @@ for name in ('local_costmap','global_costmap'):
     assert 'voxel_layer' not in cfg['plugins']
     assert cfg['inflation_layer']['inflation_radius'] == 0.25
     assert cfg['inflation_layer']['cost_scaling_factor'] == 12.0
+    assert cfg['plugins'][-3:] == ['obstacle_layer','denoise_layer','inflation_layer']
+    assert cfg['denoise_layer']['plugin'] == 'nav2_costmap_2d::DenoiseLayer'
+    assert cfg['denoise_layer']['minimal_group_size'] == 8
+    assert cfg['denoise_layer']['group_connectivity_type'] == 8
     assert cfg['footprint'] == '[[-0.40,-0.22],[-0.40,0.22],[0.40,0.22],[0.40,-0.22]]'
     assert cfg['footprint_padding'] == 0.01
     assert cfg['always_send_full_costmap'] is True

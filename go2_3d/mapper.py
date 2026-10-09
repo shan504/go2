@@ -25,6 +25,7 @@ from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
 from registration import cloud, align, static_correction_is_consistent, blend_correction
 from ros_cloud import xyz_message
 from ground import estimate_ground,body_seed_position
+from denoise import clean_directory
 
 
 def transform_matrix(transform):
@@ -361,8 +362,10 @@ class Mapper(Node):
             grid.free = free
             ground = estimate_ground(points,self.p['floor_z'])
             grid.export(points,directory,self.p['floor_z'],self.p['obstacle_min_height'],self.p['obstacle_max_height'],ground)
+            denoise_report = clean_directory(directory)
             (directory/'metadata.yaml').write_text(yaml.safe_dump(dict(frame_id='map',parameters=self.p,
-                ground_model=ground,map_type='incremental GICP scan-to-map; no loop closure',point_count=len(points))))
+                ground_model=ground,navigation_denoise=denoise_report,
+                map_type='incremental GICP scan-to-map; no loop closure',point_count=len(points))))
             link = root/'.latest-new'
             if link.is_symlink():
                 link.unlink()

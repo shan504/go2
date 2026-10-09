@@ -180,7 +180,7 @@ GICP 无效或超过 1 秒未完成匹配、运动命令超过 0.5 秒未更新�
 
 ## 已验证与尚待验证
 
-云端 x86_64：27 项真实 GICP/几何/PCD/地面/栅格/静止跳变及校正滤波测试，使用 Open3D 0.19 和 Ubuntu
+云端 x86_64：31 项真实 GICP/几何/PCD/地面/栅格/去噪/静止跳变及校正滤波测试，使用 Open3D 0.19 和 Ubuntu
 Jammy 的 0.14 均通过；ROS2 Humble 模拟三维传感器测试通过建图、TF、Foxglove 保存接口、
 地图重载、初始位姿定位与传感器丢失失效检查。原 DDS 包 4 项测试及 SDK 配置生成检查通过。
 定位新增 5 厘米细 GICP 和仅针对已接受校正的滤波；模拟测试确认错误参考系不会初始化，
@@ -221,6 +221,49 @@ ROS 测试验证数值初始位姿走真实 GICP，Nav2 就绪节点在有效标
 直接编译未修改的 Humble NavFn A* 核心复现旧图无路径、验证修复后有路径，保留 0.23 米内切净空。
 此测试不运行完整 planner_server、控制器或真实运动。`navcheck` 另比较静态内切净空与实时全局地图，
 区分地图/净空断路和额外实时障碍标记断路。目标中心为自由格不代表整条路线可达。
+
+## 独立小障碍过滤
+
+全局顺序为 `static_layer → obstacle_layer → denoise_layer → inflation_layer`，
+局部顺序为 `obstacle_layer → denoise_layer → inflation_layer`。
+使用 Humble Nav2 官方 `DenoiseLayer`，在膨胀前删除独立的 1～7 格障碍；
+八方向相邻格算同一块，8 格及以上的连通障碍保留。移除的小块不会再产生膨胀区。
+这按占据格大小过滤，不能识别物体；真实小石块、细杆等也可能被忽略。
+农场地形的坑洞、台阶、坡度可通行性不由这个二维去噪层判断。
+
+参数统一放在 [navigation_filter.yaml](go2_3d/navigation_filter.yaml)：
+默认 `minimal_group_size: 8` 表示删除 1～7 格；设为 3 时仅删除 1～2 格。
+改变参数后清理栅格并重启导航，两张代价地图使用同一阈值。
+格数对应的实际面积取决于地图分辨率：在 5 厘米栅格中，7 格面积为 0.0175 平方米。
+
+已有导航先发布停止运动，再在启动终端按 Ctrl+C。在宿主机执行：
+
+```bash
+cd ~/go2_nav
+git pull --ff-only
+bash go2_3d/tools.sh clean-map
+bash go2_3d/run.sh navigation dense
+```
+
+`clean-map` 备份为一个新目录，仅修改导航 PGM；原 PCD、地图坐标、站立高度及原目录保留，
+不用再次 `level-map`。它也让 `/map` 和操作节点的目标检查看到清理结果。
+新建地图保存、地面对齐、栅格修复时自动应用相同静态过滤。
+启动会先检查当前镜像是否含 `DenoiseLayer`；若提示缺失，执行 `bash go2_3d/build.sh` 更新镜像。
+重新初始化 GICP、确认定位有效，再启用运动并**重新发送目标**；旧失败目标不会因启用按钮而重试。
+
+验证直接编译上游未修改的 Humble 去噪算法及 NavFn 核心：同一 0.6 米通道，
+去噪前 0 步路径，去噪后 98 步；连续墙体与更大障碍仍阻断路径，未知格保持原样。
+上传的旧 163426 点地图另删除 37 个小连通块、59 个占据格，PCD 的 SHA256 不变。
+这些是算法、配置与 ROS 接口验证，尚未在当前 153401 点新地图上运行完整 Nav2 或真实运动。
+源码及研究记录见 [GO2_REFERENCE_REVIEW.md](docs/GO2_REFERENCE_REVIEW.md)。
+
+去噪规划回归（需要 Humble ROS 开发环境及完整上游 Humble Nav2 源码）：
+
+```bash
+cmake -S tests/navfn -B /tmp/go2-denoise-build -DGO2_NAVFN_SOURCE=/path/to/navigation2/nav2_navfn_planner
+cmake --build /tmp/go2-denoise-build -j2
+python3 tests/denoise_navfn_smoke.py /tmp/go2-denoise-build/grid_plan
+```
 
 本地算法测试：
 

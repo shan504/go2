@@ -66,6 +66,7 @@ class NavCheck(Node):
                              f'initial_size={p.get("width")}x{p.get("height")}m resolution={p["resolution"]} '
                              f'inflation={p["inflation_layer"]} footprint={p["footprint"]} '
                              f'padding={p.get("footprint_padding")}')
+                lines.append(f'  plugin order={p["plugins"]}; denoise={p.get("denoise_layer", "MISSING")}')
             lines.append('Global StaticLayer resizes to the saved map; actual grid dimensions follow below.')
         for topic in ('/localization/valid','/localization/status','/operator/status'):
             msg = self.latest.get(topic)

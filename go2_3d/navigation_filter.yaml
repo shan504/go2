@@ -1,0 +1,5 @@
+# Connected occupied cells, before inflation. At 5 cm, a 1--7 cell group is
+# removed; diagonal neighbours count as connected. This can also remove a
+# real thin object: use in a cleared test area, never as object recognition.
+minimal_group_size: 8
+group_connectivity_type: 8

@@ -5,6 +5,8 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 import yaml
 from ament_index_python.packages import get_package_share_directory
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from denoise import settings
 sys.path.insert(0, '/opt/go2_project/patches/dds')
 from prepare import prepare as legacy_prepare
 
@@ -44,7 +46,9 @@ def main():
         params['update_frequency'] = 5.0 if key == 'local_costmap' else 1.0
         params['publish_frequency'] = 2.0 if key == 'local_costmap' else 1.0
         # Set explicit plugins rather than depending on a particular SDK preset.
-        params['plugins'] = ['static_layer','obstacle_layer','inflation_layer'] if key == 'global_costmap' else ['obstacle_layer','inflation_layer']
+        params['plugins'] = (['static_layer'] if key == 'global_costmap' else []) + ['obstacle_layer','denoise_layer','inflation_layer']
+        params['denoise_layer'] = {'plugin':'nav2_costmap_2d::DenoiseLayer',
+                                  'enabled':True, **settings()}
         params['static_layer'] = {'plugin':'nav2_costmap_2d::StaticLayer', 'map_subscribe_transient_local':True}
         params['obstacle_layer'] = {'plugin':'nav2_costmap_2d::ObstacleLayer',
             'observation_sources':'scan', 'scan':{'topic':'/scan','data_type':'LaserScan',

@@ -13,6 +13,7 @@ from geometry import ObservedGrid
 from ground import estimate_ground,heights,level_transform
 from repair_map import grid_stats,repair
 from free_space import resample_free
+from denoise import clean_directory
 
 
 def level(root, resolution=0.05):
@@ -54,11 +55,13 @@ def level(root, resolution=0.05):
         model.update(plane=[0.,0.,1.,0.],height_at_origin=0.)
         grid.export(leveled,destination,0.,params.get('obstacle_min_height',0.10),
                     params.get('obstacle_max_height',1.5),model)
+        denoise_report = clean_directory(destination)
         if not o3d.io.write_point_cloud(str(destination/'map.pcd'),pc,compressed=True):
             raise RuntimeError('PCD write failed')
         params.update(grid_resolution=float(resolution),floor_z=0.)
         stats = dict(before=grid_stats(source),after=grid_stats(destination))
         metadata.update(parameters=params,ground_model=model,ground_aligned=True,
+                        navigation_denoise=denoise_report,
                         free_area_version=2,
                         body_height_above_ground=float(body_height),point_count=len(leveled),
                         leveled_from=str(source),map_from_previous_map=transform.tolist(),

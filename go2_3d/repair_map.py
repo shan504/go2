@@ -11,6 +11,7 @@ import yaml
 from geometry import ObservedGrid
 from ground import estimate_ground
 from free_space import restore_ancestor_free
+from denoise import clean_directory
 
 
 def grid_stats(directory):
@@ -58,8 +59,10 @@ def repair(root):
         grid.export(points,destination,p.get('floor_z',-0.30),p.get('obstacle_min_height',0.10),
                     p.get('obstacle_max_height',1.5),ground)
         shutil.copy2(source/'map.pcd',destination/'map.pcd')
+        denoise_report = clean_directory(destination)
         stats = dict(before=grid_stats(source),after=grid_stats(destination))
         metadata.update(ground_model=ground,repaired_from=str(source),repair_grid_stats=stats,
+                        navigation_denoise=denoise_report,
                         free_area_version=2,restored_free_cells=restored,
                         repair='ground-relative projection and observed-floor free cells; original XYZ preserved')
         (destination/'metadata.yaml').write_text(yaml.safe_dump(metadata))

@@ -26,8 +26,8 @@ mkdir -p "$project_dir/maps" "$project_dir/runtime"
 sudo docker image inspect go2-3d:edu >/dev/null
 if [[ "$mode" == navigation ]]; then
   sudo docker run --rm --network none --entrypoint /bin/bash \
-    -v "$project_dir/maps:/maps:ro" go2-3d:edu -c \
-    'python3 -c '\''import yaml; assert "ground_model" in yaml.safe_load(open("/maps/latest/metadata.yaml")), "Legacy navigation grid: run tools.sh repair-map before navigation"'\'''
+    -v "$project_dir/maps:/maps:ro" -v "$project_dir:/opt/go2_project:ro" go2-3d:edu -c \
+    'source /opt/ros/humble/setup.bash && python3 /opt/go2_project/go2_3d/check_nav2_plugins.py && python3 -c '\''import yaml; assert "ground_model" in yaml.safe_load(open("/maps/latest/metadata.yaml")), "Legacy navigation grid: run tools.sh repair-map before navigation"'\'''
 fi
 # Validate dependencies, SDK assets and generated copies before stopping sensors.
 sudo docker run --rm --network none --entrypoint /bin/bash \

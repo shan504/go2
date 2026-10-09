@@ -68,3 +68,33 @@
 面积修复后得到 38 步路径，端点均为自由格。这里验证了转换缺陷及修复，不是新实机地图的路径保证。
 用户先前上传的 163426 点 PCD 另经过栅格修复，验证文件 SHA256 不变。
 当前 153401 点新图是否恢复全局通路，仍需在实机重新载入修复栅格验证。
+
+## 2026-10-09 小连通障碍去噪
+
+用户确认希望忽略独立的小块，包括将来农场的小障碍。读取 Nav2 官方 GitHub 的
+[Humble DenoiseLayer 源码](https://github.com/ros-navigation/navigation2/blob/3c3db59d6969d8ecee8e68468693d006397f4a0c/nav2_costmap_2d/plugins/denoise_layer.cpp)、
+[图像连通块算法](https://github.com/ros-navigation/navigation2/blob/3c3db59d6969d8ecee8e68468693d006397f4a0c/nav2_costmap_2d/include/nav2_costmap_2d/denoise/image_processing.hpp)
+以及对应单元测试。官方网页文档和 PCL 教程在云端返回代理 403，本次结论来自成功读取的仓库源码，
+没有假称读取了受阻网页。当前 Humble 分支已包含这个插件，旧镜像则可能没有。
+
+`minimal_group_size` 定义保留块的最少格数；`group_connectivity_type` 可为 4 或 8。
+插件对 `LETHAL_OBSTACLE` / `INSCRIBED_INFLATED_OBSTACLE` 做连通块过滤，
+小于阈值的块改为 `FREE_SPACE`。因此必须放在障碍标记之后、膨胀之前，
+并同时用于全局和局部，避免实时障碍层重新制造小块膨胀区。
+它按占据格判断，不分析三维高度或识别石块、椅子腿，真实细小物体也可能被去掉。
+
+按用户补充的农场需求，采用最小保留 8 格、八方向连通，删除独立 1～7 格障碍。
+参数集中在 `navigation_filter.yaml`，
+可提高阈值；不会删除整张障碍层、缩小机器人外形或把所有未知区域当作空地。
+静态 PGM 用相同规则清理，新保存、修复及对齐地图均应用；现有图增加 `clean-map`，
+保留原目录、PCD 字节、原坐标。这样 `/map` 中的小块不会继续使操作节点拒绝目标。
+镜像构建及导航预检查均核对插件导出信息，缺失时在启动前明确报错并给出更新命令。
+
+直接编译上述源码的 `GroupsRemover` 和未修改的 NavFn A* 核心：
+0.6 米通道内的一个单格块和一个双格块，在 0.23 米内切净空下使路径步数为 0；
+去噪后得到 98 步，离线 PGM 清理也得到相同结果；换成相连九格障碍仍无路。
+未知格不改变。四项新增测试验证阈值、斜向连通、备份/PCD 不变和失败时原图保留，
+31 项算法测试在 Open3D 0.19 / Ubuntu 0.14 均通过，配置及真实 ROS 接口回归通过。
+用户之前上传的旧图删除 37 个小块、59 格，PCD SHA256 不变；不能据此保证当前新图或
+农场已经可以导航。云端没有完整 Nav2 二进制包，验证范围为上游算法核心、生成配置及 ROS 接口，
+并非完整 pluginlib/costmap/planner/controller 的实机运行。

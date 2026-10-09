@@ -6,9 +6,10 @@
 #include <stdexcept>
 #include <vector>
 #include "nav2_navfn_planner/navfn.hpp"
+#include "nav2_costmap_2d/denoise/image_processing.hpp"
 
 int main(int argc, char ** argv) {
-  if (argc != 7) {throw std::runtime_error("PGM START_X START_Y GOAL_X GOAL_Y EXPECT_PATH");}
+  if (argc != 7 && argc != 8) {throw std::runtime_error("PGM START_X START_Y GOAL_X GOAL_Y EXPECT_PATH [DENOISE_MIN_GROUP]");}
   std::ifstream input(argv[1], std::ios::binary);
   std::string magic; int width, height, max;
   input >> magic >> width >> height >> max; input.get();
@@ -21,7 +22,25 @@ int main(int argc, char ** argv) {
     for (int x = 0; x < width; ++x) {
       auto value = pixels[(height - 1 - y) * width + x];
       costs[y * width + x] = value >= 250 ? 0 : value <= 10 ? 254 : 255;
-      if (value <= 10) {occupied.emplace_back(x, y);}
+    }
+  }
+  // The exact upstream Humble DenoiseLayer::removeGroups algorithm, on
+  // combined pre-inflation costs. Unknown remains background and unchanged
+  // for the global costmap; the configured local map has no unknown cells.
+  if (argc == 8) {
+    nav2_costmap_2d::Image<uint8_t> image(height, width, costs.data(), width);
+    nav2_costmap_2d::MemoryBuffer buffer;
+    nav2_costmap_2d::imgproc_impl::GroupsRemover remover;
+    remover.removeGroups(image, buffer, nav2_costmap_2d::ConnectivityType::Way8,
+      std::stoi(argv[7]), [](uint8_t value) {return value != 254 && value != 253;});
+  }
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      if (costs[y * width + x] == 254) {occupied.emplace_back(x, y);}
+      auto before = pixels[(height - 1 - y) * width + x];
+      if (before == 205 && costs[y * width + x] != 255) {
+        throw std::runtime_error("Denoise must not change unknown cells");
+      }
     }
   }
   // Same cost thresholds as the configured InflationLayer: 0.23m padded
