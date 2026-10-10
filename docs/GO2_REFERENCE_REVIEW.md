@@ -189,3 +189,18 @@ MotionSwitcher 回复 `{'form':'0','name':'mcf'}`；原生避障 SwitchGet 回�
 输入切换回复丢失也清理；速度拒绝和桥再次启用提前停止。保持原导航桥配置，
 等待实际前进验证再决定是否把该后端用于 Nav2。隔离 ROS 模拟验证协议和失败收尾，
 没有验证真实底盘运动。
+
+## 四足确认与站立准备假设
+
+用户确认官方遥控器让机器人四条腿迈步，纠正此前按轮足 Go2W 描述的假设。
+此前 Move/Stop 的字段核对仍适用，但后续模式、步态与物理行为应按四足 Go2 固件核对。
+原生避障测试的输入选择、39 次 Move/零速度和释放都响应 code0，仍只探身、位移约 7.5cm。
+API1034 的 code0/data='' 不提供可解释状态，不能认定其在该固件上受支持。
+
+官方[四足 Sport 示例](https://github.com/unitreerobotics/unitree_sdk2_python/blob/814556d15970dd2ecf1c9984e845ca02ab07e206/example/go2/high_level/go2_sport_client.py)
+提供 BalanceStand；上述社区 MCF 示例明确提示 StandUp 后可能锁定站立，Move 前执行 BalanceStand1002。
+这是待验证的准备状态假设，尚未证明当前机器人处于这种状态。
+新增显式 `drivecheck-balanced`，不改变导航默认行为：单次 BalanceStand，匹配 code0，
+等待0.5秒、重新核对禁用桥，然后保持0.15m/s两秒 Move并Stop。
+匹配失败、缺少准备回复和SIGINT/SIGTERM均Stop，未获准备确认不发Move。
+隔离ROS验证协议与退出路径，不据模拟成功声称机器人已能迈步。

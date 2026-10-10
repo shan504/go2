@@ -121,7 +121,7 @@ class RobotCheck(Node):
             lines.append(f'  max_native_XY_displacement={self.maximum_displacement.get(topic, 0.0):.3f}m '
                          '(since first observed state)')
         lines.append('Native velocity is measured state; the command velocity is different. '
-                     'Preserve raw mode/gait numbers for the installed Go2W firmware.')
+                     'Preserve raw mode/gait numbers for the installed Go2 firmware.')
         return '\n'.join(lines)
 
 

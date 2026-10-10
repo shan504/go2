@@ -337,7 +337,7 @@ Foxglove 的停止按钮停止的是导航桥，不能替代手动测试自己�
 `/sportmodestate` 与 `/lf/sportmodestate`；另按 MCF 社区示例读取 Sport GetState（API1034，
 仅查询 state/bodyHeight/speedLevel/gait/continuousGait/economicGait）。不支持该查询的固件
 会报告响应原文或缺少响应。缺少回复或状态接口会如实报告，不推断禁用状态。
-原始 mode/gait 数字按实际 Go2W 固件保留。输出保存到 `runtime/robot-debug.txt`。
+原始 mode/gait 数字按实际 Go2 固件保留。输出保存到 `runtime/robot-debug.txt`。
 
 Foxglove “停止运动＋取消导航”只取消本程序的目标并禁用本桥；它不会夺取官方遥控器的控制权。
 软件禁用是否生效应以 `enable_control=False` 的回读为准，不能凭站着不动判断按钮效果。
@@ -377,6 +377,31 @@ bash go2_3d/tools.sh drivecheck-native
 手动测试期间用 Ctrl+C 中断，不以 Foxglove 导航桥停止按钮替代。
 输出保存到 `runtime/native-drive-debug.txt`。能否实际前进仍需现场确认；
 当前 Nav2 桥继续使用原 Sport 后端，不因诊断自动改用避障后端。
+
+### 四足 Go2 的平衡站立准备测试
+
+用户随后确认机器人使用四条腿迈步，属于四足 Go2，应纠正此前根据照片按 Go2W 描述的假设。
+官方四足 SportClient 同样使用 Move1008/Stop1003，并提供 BalanceStand1002。
+本次原生避障路径也全部回复 code0，却仍只有探身；MCF GetState1034 返回空字符串。
+因此不能认定避障输入路径就是根因，也不能把空字符串当成有意义的 MCF 状态。
+
+MCF 社区示例指出 StandUp 后可能仍处于锁定站立，建议在 Move 前执行 BalanceStand。
+显式 `drivecheck-balanced` 只检验这一项准备动作：桥保持禁用、发一次 BalanceStand1002，
+获得匹配 code0 后等 0.5 秒，再回读桥参数，发送原来 0.15m/s、两秒的 Sport Move 并 Stop。
+不发送 StandUp、步态、MotionSwitcher、避障开关或速度档位命令，不自动改变导航桥启动行为。
+准备动作被拒、缺少回复或被中断时发送 Stop，不继续发送 Move。
+该准备步骤是否能解决实际不迈步，仍需现场验证：
+
+```bash
+cd ~/go2_nav
+git pull --ff-only
+bash go2_3d/tools.sh disable
+bash go2_3d/tools.sh drivecheck-balanced
+```
+
+保持导航启动终端运行，在空地、机器人已站稳、遥控器摇杆回中时测试；期间不点启用。
+输出保存到 `runtime/balanced-drive-debug.txt`。命令会调整为平衡站立准备状态；
+不在测试结束后强制恢复一个未知的原始站立状态。正常结束和 Ctrl+C 发送 StopMove。
 
 ## 清理现有静态地图
 

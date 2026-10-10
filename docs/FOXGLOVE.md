@@ -247,6 +247,9 @@ Ctrl+C 也发送 Stop，输出保存到 `runtime/drive-debug.txt`。
 直接 Sport 测试已发送成功但只有探身、且原生避障 enable=True 时，可以按 README
 运行 `tools.sh drivecheck-native`。它使用官方内置避障 API 输入和速度路径，
 保留避障开关，结束会发零速度、Stop 并释放 API 输入；不自动修改导航桥后端或步态。
+四足 Go2 若两条接口均只探身，可按 README 执行 `tools.sh drivecheck-balanced`：
+显式做一次 BalanceStand1002，等待匹配成功后再运行原速度的两秒 Sport 测试。
+这只验证站立准备假设，不自动加入正常导航；记录保存为 `runtime/balanced-drive-debug.txt`。
 若重启后一直等待 `base_link → map`，先重新初始化 GICP；
 Ctrl+C 后的 ROS context invalid 错误属于关闭阶段，不能据此判断运动桥故障。
 

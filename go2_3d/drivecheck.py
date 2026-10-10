@@ -25,6 +25,7 @@ class ManualDrive(Node):
         self.guard = self.create_client(GetParameters,'/go2_edu_dds_bridge/get_parameters')
         self.requests = self.create_publisher(Request,'/api/sport/request',10)
         self.moves = 0
+        self.cancel_check = lambda: False
         self.sent, self.replied = {}, {}
         self.create_subscription(Response, '/api/sport/response', self.response,
                                  qos_profile_sensor_data)
@@ -68,6 +69,18 @@ class ManualDrive(Node):
         request.parameter = parameter
         self.sent[(request.header.identity.id, api_id)] = time.monotonic()
         self.requests.publish(request)
+        return (request.header.identity.id, api_id)
+
+    def call_request(self, api_id, parameter, spin, timeout=2.0):
+        key = self.publish_request(api_id, parameter)
+        deadline = time.monotonic()+timeout
+        while key not in self.replied and time.monotonic()<deadline:
+            spin(0.02)
+        code = self.replied.get(key)
+        if code is None:
+            raise DriveRefused(f'Sport API{api_id} has no matching reply')
+        if code != 0:
+            raise DriveRefused(f'Sport API{api_id} rejected with code={code}')
 
     def prepare_drive(self, spin):
         pass
@@ -84,16 +97,22 @@ class ManualDrive(Node):
             print(f'StopMove API1003 sent; Move requests={self.moves}.',flush=True)
 
     def run(self,executor=None):
-        def spin(timeout):
+        def cleanup_spin(timeout):
             if executor is None:
                 rclpy.spin_once(self,timeout_sec=timeout)
             else:
                 executor.spin_once(timeout_sec=timeout)
+        def spin(timeout):
+            cleanup_spin(timeout)
+            # Raise in Python after the ROS call returns. Raising directly from
+            # a signal handler can interrupt pybind and hide KeyboardInterrupt
+            # inside a conversion error, including during Stop flushing.
+            if self.cancel_check():
+                raise KeyboardInterrupt
         def wait(future):
-            if executor is None:
-                rclpy.spin_until_future_complete(self,future,timeout_sec=2.0)
-            else:
-                executor.spin_until_future_complete(future,timeout_sec=2.0)
+            deadline = time.monotonic()+2.0
+            while not future.done() and time.monotonic()<deadline:
+                spin(0.02)
         if not self.guard.wait_for_service(timeout_sec=3.0):
             raise DriveRefused('Bridge GetParameters service unavailable')
         future = self.query_guard()
@@ -151,16 +170,21 @@ class ManualDrive(Node):
         finally:
             # Refused preflight never stops an existing navigation session.
             # Once this diagnostic sent Move, every exit sends StopMove.
-            self.stop_drive(spin)
+            # Ignore the latched cancellation during bounded cleanup, so zero
+            # velocity, Stop and input release can all finish.
+            self.stop_drive(cleanup_spin)
 
 
 def main(drive_type=ManualDrive):
+    cancelled = False
     def terminate(signum,frame):
-        raise KeyboardInterrupt
+        nonlocal cancelled
+        cancelled = True
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     signal.signal(signal.SIGINT,terminate)
     signal.signal(signal.SIGTERM,terminate)
     node = drive_type()
+    node.cancel_check = lambda: cancelled
     from rclpy.executors import SingleThreadedExecutor
     from robotcheck import RobotCheck
     native = RobotCheck()
@@ -171,7 +195,7 @@ def main(drive_type=ManualDrive):
         node.run(executor)
         return 0
     except KeyboardInterrupt:
-        print('Manual diagnostic interrupted; stopped.',flush=True)
+        print('Manual diagnostic interrupted.',flush=True)
         return 130
     except Exception as error:
         print(f'Manual diagnostic refused/stopped: {error}',flush=True)

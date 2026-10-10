@@ -23,13 +23,17 @@ class MockBridge(Node):
         self.requests = []
         self.responses = self.create_publisher(Response,'/api/sport/response',10)
         self.reenable = False
+        self.api_codes = {}
+        self.drop_apis = set()
         self.create_subscription(Request,'/api/sport/request',self.receive,10)
 
     def receive(self,message):
         self.requests.append(message)
         response = Response()
         response.header.identity = copy.deepcopy(message.header.identity)
-        response.header.status.code = 0
+        if message.header.identity.api_id in self.drop_apis:
+            return
+        response.header.status.code = self.api_codes.get(message.header.identity.api_id, 0)
         self.responses.publish(response)
         # An unrelated client response must not be attributed to this test.
         response.header.identity.id += 1
@@ -48,9 +52,10 @@ thread = threading.Thread(target=executor.spin,daemon=True)
 thread.start()
 
 
-def invoke(interrupt=None):
+def invoke(interrupt=None, balanced=False):
     before = len(bridge.requests)
-    process = subprocess.Popen([sys.executable,str(script)],stdout=subprocess.PIPE,
+    target = script.with_name('balanced_drivecheck.py') if balanced else script
+    process = subprocess.Popen([sys.executable,str(target)],stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT,text=True)
     if interrupt is not None:
         deadline = time.monotonic()+6
@@ -65,7 +70,8 @@ def invoke(interrupt=None):
     output,_ = process.communicate(timeout=8)
     time.sleep(0.05)
     observed = bridge.requests[before:]
-    assert all(message.header.identity.api_id in (1003, 1008, 1034) for message in observed)
+    permitted = (1002, 1003, 1008, 1034) if balanced else (1003, 1008, 1034)
+    assert all(message.header.identity.api_id in permitted for message in observed)
     # A read-only GetState may arrive during Stop flushing; check the last
     # control command, rather than treating a subsequent query as motion.
     controls = [message for message in observed if message.header.identity.api_id != 1034]
@@ -97,6 +103,29 @@ try:
     code,requests,output = invoke()
     assert code==2 and requests==[] and 'allow_motion' in output,(requests,output)
     bridge.set_parameters([Parameter('allow_motion',value=True)])
+    code,requests,output = invoke(balanced=True)
+    assert code==0,output
+    assert requests[0].header.identity.api_id==1002 and requests[0].parameter=='{}',output
+    assert requests[-1].header.identity.api_id==1003,output
+    assert sum(message.header.identity.api_id==1002 for message in requests)==1
+    assert 30<=sum(message.header.identity.api_id==1008 for message in requests)<=40
+    assert 'BalanceStand: attempted=True matched_response_codes=[0]' in output,output
+    for interrupt in (signal.SIGINT,signal.SIGTERM):
+        code,requests,output = invoke(interrupt,balanced=True)
+        assert code==130 and requests[0].header.identity.api_id==1002,output
+        assert requests[-1].header.identity.api_id==1003,output
+    bridge.api_codes[1002] = 7654
+    code,requests,output = invoke(balanced=True)
+    assert code==2 and 'code=7654' in output,output
+    assert [message.header.identity.api_id for message in requests]==[1002,1003],output
+    bridge.api_codes.clear()
+    bridge.drop_apis.add(1002)
+    code,requests,output = invoke(balanced=True)
+    assert code==2 and 'no matching reply' in output,output
+    assert [message.header.identity.api_id for message in requests]==[1002,1003],output
+    bridge.drop_apis.clear()
+    print('PASS prepared drive: one BalanceStand before bounded Move, SIGINT/SIGTERM Stop, '
+          'rejected or missing preparation acknowledgement sends Stop without Move')
     bridge.reenable = True
     code,requests,output = invoke()
     assert code==2 and requests[-1].header.identity.api_id==1003,(requests,output)
