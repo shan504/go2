@@ -66,7 +66,8 @@ bash go2_3d/run.sh mapping
 右 3D 面板用于目标点。场景右侧尺子下方的发布工具需要先启用，再依次**单击位置、单击朝向**；
 这不是 RViz 的拖动后松开操作。详见上面的操作说明，布局导入兼容性尚待用户桌面确认。
 
-地图保存到仓库目录的 `maps/时间戳/`，`maps/latest` 只在全部保存成功后更新。
+地图保存到仓库目录的 `maps/library/地图名/时间戳/`，未指定名称时为 `default`。
+每次保存生成新版本，`maps/latest` 和该名称的 `latest` 只在全部保存成功后更新；旧版本保留。
 建图 GICP 使用 15 厘米降采样，定位使用 5 厘米细配准，标准显示/PCD 地图使用 6 厘米，保留三维高度；
 静止时每隔 2 秒将通过匹配检查的扫描加入地图，补充单帧雷达覆盖。
 需要更稠密的室内地图时，使用 `bash go2_3d/run.sh mapping dense`：保存分辨率为
@@ -178,6 +179,59 @@ Nav2 使用动态 `base_footprint`：投影到 map 栅格的 XY 平面，保留�
 已验证的目标以固定 map 位姿发送，不携带历史机身时间；规划失败直接结束，不自动转圈/倒退。
 
 **首次启动和模式切换目前通过 SSH；显示、保存、定位初始化、导航目标与运动开关通过 Foxglove。**
+
+## 多点导航与室内、农场地图保存
+
+已实机确认单点到达：`SUCCEEDED`、末端误差26.7厘米，符合30厘米的位置到达半径，终点朝向不限。
+多点导航沿用这套单点控制，操作节点按点击顺序逐一发送 `NavigateToPose`：
+
+1. 更新后保持狗站稳，在第二个SSH终端执行 `bash go2_3d/tools.sh restart-navigation`，保留当前位置重启。
+2. 确认定位有效、Nav2已启动，运动先保持关闭。在Foxglove目标工具中依次发布多个点；
+   每个点仍需完成“单击位置、单击朝向”这两次点击。每次完成一次发布就是加入一个航点。
+3. 点一次“启用运动”。到第一个点确认 `SUCCEEDED` 后自动走第二个，直到队列完成；运行中也可以追加。
+   `/operator/status` 显示 `route current=编号 queued=剩余数 completed=完成数 paused=是否暂停`。
+4. 某点失败或下一点变成障碍，保留失败点及后续点并暂停，**不跳过、不自动重试**。
+   修复后执行 `bash go2_3d/tools.sh resume`，从失败点重试；运动关闭时仍需另行启用。
+   想重新选路线，先取消清空，随后选新点。队列最多100点，存于内存，重启后需重新选择。
+
+“停止运动＋取消导航”和“取消路线”都会清空队列；定位丢失也会取消并清空，重新定位后重新选点。
+新版布局 [docs/foxglove_go2_navigation.json](docs/foxglove_go2_navigation.json) 增加“重试暂停路线”，
+`/navigation/waypoints` 显示编号：绿色待执行、橙色当前、红色暂停。已有布局也能直接连续选点，
+可自行添加该MarkerArray话题来显示所有航点。
+
+**先保留当前室内地图**，以下命令可在当前导航运行时执行，不改变其加载的地图：
+
+```bash
+cd ~/go2_nav
+bash go2_3d/tools.sh archive-map indoor --all
+bash go2_3d/tools.sh maps
+```
+
+`--all` 复制当前地图以及 `maps/` 下完整的旧版时间戳、修复、调平、清理目录到
+`maps/library/indoor/`。原目录仍保留；点云、栅格、地面模型和定位参数完整复制并校验SHA256。
+重复归档同一版本不覆盖文件；同名内容冲突会报错。这里只归档磁盘中已经保存的地图，
+仍在建图时须先执行 `tools.sh save` 并确认成功。地图留在机器狗电脑的 `~/go2_nav/maps/`，不会上传到Git。
+
+以后到农场，在启动终端Ctrl+C结束当前导航，再启动独立命名的建图：
+
+```bash
+bash go2_3d/run.sh mapping dense farm
+# 在第二个SSH终端，采集完后保存；可多次保存，版本互不覆盖
+bash ~/go2_nav/go2_3d/tools.sh save
+bash ~/go2_nav/go2_3d/tools.sh maps
+```
+
+农场图放在 `maps/library/farm/时间戳/`，室内图保留。保存后全局 `maps/latest` 指向新农场图。
+要切回室内，先Ctrl+C结束建图/导航，然后：
+
+```bash
+bash go2_3d/tools.sh use-map indoor
+bash go2_3d/run.sh navigation dense
+```
+
+切图必须重新在该图的实际位置初始化 `/initialpose`，确认定位后再选路线；农场坐标不能当成室内坐标。
+`use-map farm` 切回农场，`use-map indoor 版本目录名` 可选择历史版本。
+容器运行时禁止切图，归档允许运行中执行。地图清理、修复、调平也生成同名地图的新版本，保留前版。
 
 ## 运动与实机验收
 

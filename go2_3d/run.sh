@@ -3,15 +3,27 @@ set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:-mapping}"
 profile="${2:-standard}"
-case "$mode" in mapping|localization|navigation) ;; *) echo 'Usage: run.sh [mapping|localization|navigation] [standard|dense]' >&2; exit 2 ;; esac
+case "$mode" in mapping|localization|navigation) ;; *) echo 'Usage: run.sh mapping [standard|dense] [MAP_NAME] | run.sh [localization|navigation] [standard|dense] [X Y YAW_DEGREES [Z]]' >&2; exit 2 ;; esac
 case "$profile" in standard|dense) ;; *) echo 'Profile must be standard or dense' >&2; exit 2 ;; esac
 auto_initialize=false
+map_name=default
 initial_x=0.0; initial_y=0.0; initial_yaw=0.0; initial_z=0.0
 if (( $# > 2 )); then
-  [[ "$mode" != mapping && ( $# == 5 || $# == 6 ) ]] || { echo 'Usage: run.sh navigation dense X Y YAW_DEGREES [Z] (actual map pose)' >&2; exit 2; }
-  initial_x="$3"; initial_y="$4"; initial_yaw="$5"; initial_z="${6:-0.0}"
-  python3 -c 'import sys,math; assert all(math.isfinite(float(s)) for s in sys.argv[1:]), "Pose must be finite"' "$initial_x" "$initial_y" "$initial_yaw" "$initial_z"
-  auto_initialize=true
+  if [[ "$mode" == mapping ]]; then
+    [[ $# == 3 ]] || { echo 'Usage: run.sh mapping [standard|dense] MAP_NAME' >&2; exit 2; }
+    map_name="$3"
+    python3 - "$map_name" <<'PY'
+import sys
+# Validate without importing ROS or numerical libraries on the host.
+import re
+assert re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}',sys.argv[1]), 'Invalid map name'
+PY
+  else
+    [[ $# == 5 || $# == 6 ]] || { echo 'Usage: run.sh navigation dense X Y YAW_DEGREES [Z] (actual map pose)' >&2; exit 2; }
+    initial_x="$3"; initial_y="$4"; initial_yaw="$5"; initial_z="${6:-0.0}"
+    python3 -c 'import sys,math; assert all(math.isfinite(float(s)) for s in sys.argv[1:]), "Pose must be finite"' "$initial_x" "$initial_y" "$initial_yaw" "$initial_z"
+    auto_initialize=true
+  fi
 fi
 gicp_params=/opt/go2_project/go2_3d/gicp.yaml
 [[ "$profile" == dense ]] && gicp_params=/opt/go2_project/go2_3d/gicp_dense.yaml
@@ -57,4 +69,4 @@ sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --
   -v "$project_dir:/opt/go2_project:ro" \
   -v "$project_dir/runtime:/runtime:ro" -v "$project_dir/maps:/maps:rw" \
   --entrypoint /bin/bash go2-3d:edu -c \
-  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z"
+  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7" map_name:="$8"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z" "$map_name"

@@ -85,9 +85,16 @@ def restore_ancestor_free(root, metadata, grid):
     visited = set()
     restored = set()
     while current.get('ground_aligned') and current.get('leveled_from'):
-        # Saved paths refer to /maps in Docker. Resolve only retained siblings
-        # within this maps root, so an exported metadata path cannot read elsewhere.
-        parent = (root/Path(current['leveled_from']).name).resolve()
+        # Paths may name a legacy sibling or a version in library/NAME.
+        # Remap the Docker /maps prefix when running an offline exported test.
+        saved = Path(current['leveled_from'])
+        if saved.is_absolute() and saved.parts[:2] == ('/','maps'):
+            parent = root/Path(*saved.parts[2:])
+        elif saved.is_absolute():
+            parent = saved
+        else:
+            parent = root/saved
+        parent = parent.resolve()
         if root not in parent.parents or parent in visited:
             raise ValueError('Invalid/cyclic retained source-map path')
         visited.add(parent)

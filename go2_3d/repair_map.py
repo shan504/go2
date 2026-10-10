@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Rebuild a saved map's navigation grid; preserve original PCD and old directory."""
 import argparse
-from datetime import datetime,timezone
-import os
 from pathlib import Path
 import shutil
 import numpy as np
@@ -12,6 +10,7 @@ from geometry import ObservedGrid
 from ground import estimate_ground
 from free_space import restore_ancestor_free
 from denoise import clean_directory
+from map_library import inside, new_directory, publish, source_name
 
 
 def grid_stats(directory):
@@ -42,16 +41,16 @@ def load_old_free(source,grid):
 
 
 def repair(root):
-    root = Path(root)
-    source = (root/'latest').resolve(strict=True)
+    root = Path(root).resolve()
+    source = inside(root,(root/'latest').resolve(strict=True))
     metadata = yaml.safe_load((source/'metadata.yaml').read_text())
     points = np.asarray(o3d.io.read_point_cloud(str(source/'map.pcd')).points)
     p = metadata['parameters']
     # A leveled map has floor z=0; it is not a body-origin map with ground below
     # -0.10. Reuse its validated plane instead of fitting below the new origin.
     ground = metadata['ground_model'] if metadata.get('ground_aligned') else estimate_ground(points,p.get('floor_z',-0.30))
-    destination = root/('repaired-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
-    destination.mkdir()
+    destination = new_directory(root,source_name(root,source),'repaired-')
+    destination.mkdir(parents=True)
     try:
         grid = ObservedGrid(p.get('grid_resolution',0.10))
         load_old_free(source,grid)
@@ -66,11 +65,7 @@ def repair(root):
                         free_area_version=2,restored_free_cells=restored,
                         repair='ground-relative projection and observed-floor free cells; original XYZ preserved')
         (destination/'metadata.yaml').write_text(yaml.safe_dump(metadata))
-        link = root/'.latest-repair'
-        if link.is_symlink():
-            link.unlink()
-        link.symlink_to(destination.name)
-        os.replace(link,root/'latest')
+        publish(root,destination)
     except Exception:
         # Never publish a partial map as latest. Keep the old directory intact.
         shutil.rmtree(destination)

@@ -84,7 +84,7 @@ class Sensors(Node):
 
 def phase(directory,mode,dense=False,auto=False):
     arguments = ['--ros-args','-p',f'mode:={mode}','-p',f'output_directory:={directory}',
-                 '-p',f'map_directory:={directory}/latest']
+                 '-p',f'map_directory:={directory}/latest','-p','map_name:=indoor']
     if dense:
         arguments += ['--params-file',str(Path(__file__).resolve().parents[1]/'go2_3d/gicp_dense.yaml')]
     if auto:
@@ -132,6 +132,8 @@ def phase(directory,mode,dense=False,auto=False):
                 assert (Path(directory)/'latest'/name).is_file(),name
             import open3d as o3d
             saved = o3d.io.read_point_cloud(str(Path(directory)/'latest/map.pcd'))
+            assert (Path(directory)/'latest').resolve().parent == Path(directory)/'library/indoor'
+            assert (Path(directory)/'library/indoor/latest').resolve() == (Path(directory)/'latest').resolve()
             assert len(saved.points)>initial_count*1.3,'PCD was coarsened back to registration resolution'
             assert sensors.valid is False,'Mapping must never enable navigation motion'
             if dense:

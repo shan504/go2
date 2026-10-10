@@ -8,6 +8,7 @@ import numpy as np
 import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'go2_3d'))
 from denoise import clean_image, clean_directory
+from map_library import archive, select, fingerprints
 from clean_map import clean
 
 
@@ -82,7 +83,21 @@ class DenoiseTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     clean(root)
             self.assertEqual((root/'latest').resolve(), source)
-            self.assertEqual(sorted(p.name for p in root.iterdir()), ['latest', 'original'])
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ['latest', 'library', 'original'])
+            self.assertEqual(list(root.glob('library/*/*')), [], 'Failed copy published/retained a partial version')
+
+    def test_clean_named_map_keeps_original_archive_and_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source = write_map(root,corridor())
+            copied = archive(root,'indoor')
+            before = fingerprints(copied)
+            select(root,'indoor')
+            destination = clean(root)
+            self.assertEqual(destination.parent,root/'library/indoor')
+            self.assertEqual(fingerprints(copied),before)
+            self.assertEqual((source/'map.pcd').read_bytes(),(destination/'map.pcd').read_bytes())
+            self.assertFalse((destination/'archive.yaml').exists())
+            self.assertEqual((root/'library/indoor/latest').resolve(),destination)
 
 
 if __name__ == '__main__':

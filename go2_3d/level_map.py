@@ -2,8 +2,6 @@
 """Level a saved 3D map and regenerate a finer grid without erasing obstacles."""
 import argparse
 import copy
-from datetime import datetime,timezone
-import os
 from pathlib import Path
 import shutil
 import numpy as np
@@ -14,13 +12,14 @@ from ground import estimate_ground,heights,level_transform
 from repair_map import grid_stats,repair
 from free_space import resample_free
 from denoise import clean_directory
+from map_library import inside, new_directory, publish, source_name
 
 
 def level(root, resolution=0.05):
     if not np.isfinite(resolution) or not 0.025 <= resolution <= 0.20:
         raise ValueError('Grid resolution must be between 0.025 and 0.20 metres')
     root = Path(root).resolve()
-    source = (root/'latest').resolve(strict=True)
+    source = inside(root,(root/'latest').resolve(strict=True))
     metadata = yaml.safe_load((source/'metadata.yaml').read_text())
     if metadata.get('ground_aligned') and np.isclose(metadata['parameters']['grid_resolution'],resolution):
         if metadata.get('free_area_version',0)<2:
@@ -45,9 +44,8 @@ def level(root, resolution=0.05):
         raise ValueError('Cannot infer standing body height; original retained')
     grid = ObservedGrid(resolution)
     grid.free = resample_free(source,ground,transform,resolution,grid.max_cells)
-    destination = root/('leveled-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
-    destination.mkdir()
-    link = root/'.latest-level'
+    destination = new_directory(root,source_name(root,source),'leveled-')
+    destination.mkdir(parents=True)
     try:
         pc.transform(transform)
         leveled = np.asarray(pc.points)
@@ -69,13 +67,8 @@ def level(root, resolution=0.05):
                         initial_pose_reference='z=0: standing body above floor; nonzero z: explicit body height',
                         level='Rigid ground alignment; all 3D points and physical obstacles retained')
         (destination/'metadata.yaml').write_text(yaml.safe_dump(metadata))
-        if link.is_symlink():
-            link.unlink()
-        link.symlink_to(destination.name)
-        os.replace(link,root/'latest')
+        publish(root,destination)
     except Exception:
-        if link.is_symlink():
-            link.unlink()
         shutil.rmtree(destination)
         raise
     print(f'LEVELED 3D map: {destination}\nOriginal retained: {source}\n'

@@ -1,6 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-check}" in
+  archive-map|use-map|maps)
+    project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+    case "$1" in
+      archive-map) [[ $# == 2 || ( $# == 3 && "$3" == --all ) ]] || { echo 'Usage: tools.sh archive-map NAME [--all]' >&2; exit 2; }; action=archive ;;
+      use-map)
+        [[ $# == 2 || $# == 3 ]] || { echo 'Usage: tools.sh use-map NAME [VERSION]' >&2; exit 2; }
+        if sudo docker container inspect go2-3d >/dev/null 2>&1; then
+          echo 'Stop the navigation/mapping launcher with Ctrl+C before switching its loaded map.' >&2
+          exit 1
+        fi
+        action=select ;;
+      maps) [[ $# == 1 ]] || { echo 'Usage: tools.sh maps' >&2; exit 2; }; action=list ;;
+    esac
+    mkdir -p "$project_dir/maps"
+    sudo docker run --rm --network none --entrypoint /bin/bash \
+      -v "$project_dir:/opt/go2_project:ro" -v "$project_dir/maps:/maps:rw" \
+      go2-3d:edu -c 'python3 /opt/go2_project/go2_3d/map_library.py "$@"' bash "$action" "${@:2}"
+    ;;
+  resume|cancel)
+    [[ $# == 1 ]] || { echo 'Usage: tools.sh resume | cancel' >&2; exit 2; }
+    sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && timeout 10 ros2 topic pub --once "/navigation/$1" std_msgs/msg/Empty "{}"' bash "$1"
+    ;;
   restart-navigation)
     [[ $# -le 2 ]] || { echo 'Usage: tools.sh restart-navigation [standard|dense]' >&2; exit 2; }
     profile="${2:-dense}"
@@ -107,5 +129,5 @@ PY
   shell)
     sudo docker exec -it go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec bash --norc'
     ;;
-  *) echo 'Usage: tools.sh [restart-navigation [standard|dense]|export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|drivecheck-native|drivecheck-balanced|drivecheck-walk|save|enable|disable|shell]' >&2; exit 2 ;;
+  *) echo 'Usage: tools.sh [archive-map NAME [--all]|use-map NAME [VERSION]|maps|resume|cancel|restart-navigation [standard|dense]|export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|drivecheck-native|drivecheck-balanced|drivecheck-walk|save|enable|disable|shell]' >&2; exit 2 ;;
 esac

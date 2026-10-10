@@ -55,7 +55,8 @@ class LevelMapTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     level(root)
             self.assertEqual((root/'latest').resolve(),old,'Failed write must keep original selected')
-            self.assertEqual(sorted(p.name for p in root.iterdir()),['latest','original'])
+            self.assertEqual(sorted(p.name for p in root.iterdir()),['latest','library','original'])
+            self.assertEqual(list(root.glob('library/*/*')), [], 'Failed write left a published/partial version')
             new = level(root)
             metadata = yaml.safe_load((new/'metadata.yaml').read_text())
             matrix = np.array(metadata['map_from_previous_map'])

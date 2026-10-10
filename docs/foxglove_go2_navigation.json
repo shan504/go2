@@ -192,6 +192,9 @@
         },
         "/point_cloud2": {
           "visible": false
+        },
+        "/navigation/waypoints": {
+          "visible": true
         }
       },
       "layers": {},
@@ -229,8 +232,8 @@
       "datatype": "std_msgs/msg/Empty",
       "value": "{}",
       "advancedView": true,
-      "buttonText": "取消当前目标",
-      "buttonTooltip": "取消当前目标",
+      "buttonText": "取消路线",
+      "buttonTooltip": "取消路线",
       "buttonColor": "#b76b12"
     },
     "Image!g2camera": {
@@ -360,6 +363,15 @@
       "diffMethod": "custom",
       "diffTopicPath": "",
       "showFullMessageForDiff": false
+    },
+    "Publish!g2resume": {
+      "topicName": "/navigation/resume",
+      "datatype": "std_msgs/msg/Empty",
+      "value": "{}",
+      "advancedView": true,
+      "buttonText": "重试暂停路线",
+      "buttonTooltip": "修复失败点后，显式重试并继续后续航点",
+      "buttonColor": "#326bb7"
     }
   },
   "globalVariables": {},
@@ -379,7 +391,12 @@
         "first": "Publish!g2enable",
         "second": {
           "first": "Publish!g2stop",
-          "second": "Publish!g2cancel",
+          "second": {
+            "first": "Publish!g2cancel",
+            "second": "Publish!g2resume",
+            "direction": "column",
+            "splitPercentage": 50
+          },
           "direction": "row",
           "splitPercentage": 55
         },

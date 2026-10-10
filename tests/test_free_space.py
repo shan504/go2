@@ -88,7 +88,7 @@ class FreeAreaTests(unittest.TestCase):
             self.assertEqual((broken/'map.pcd').read_bytes(),before)
             # The level-map entry also repairs an existing legacy leveled
             # map without applying a second coordinate transform.
-            (root/'latest').unlink();(root/'latest').symlink_to(broken.name)
+            (root/'latest').unlink();(root/'latest').symlink_to(broken.relative_to(root))
             via_level=level(root)
             self.assertEqual((via_level/'map.pcd').read_bytes(),before)
             self.assertTrue(reaches(via_level,(0.25,0.45),(1.75,0.45)))

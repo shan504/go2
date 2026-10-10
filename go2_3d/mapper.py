@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Odometry-seeded 3D scan-to-map GICP and saved-map localization (ROS2 Humble)."""
-import os
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
 from pathlib import Path
+from map_library import map_name, new_directory, publish
 import numpy as np
 import open3d as o3d
 import yaml
@@ -36,7 +35,7 @@ def transform_matrix(transform):
 class Mapper(Node):
     def __init__(self):
         super().__init__('go2_gicp')
-        defaults = dict(mode='mapping', map_directory='/maps/latest', output_directory='/maps',
+        defaults = dict(mode='mapping', map_directory='/maps/latest', output_directory='/maps', map_name='default',
                         voxel_size=0.15, map_voxel_size=0.06, keyframe_max_interval=2.0,
                         scan_window=0.0, map_publish_period=2.0,
                         grid_resolution=0.10, floor_z=-0.30,
@@ -55,6 +54,7 @@ class Mapper(Node):
             raise ValueError('correction_alpha must be greater than 0 and at most 1')
         if self.p['mode'] not in ('mapping','localization'):
             raise ValueError('mode must be mapping or localization')
+        map_name(self.p['map_name'])
         self.lock = threading.RLock()
         self.generation = 0
         self.latest = None
@@ -353,7 +353,7 @@ class Mapper(Node):
             response.success, response.message = False, 'No usable 3D map yet'
             return response
         root = Path(self.p['output_directory'])
-        directory = root/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+        directory = new_directory(root,map_name(self.p['map_name']))
         try:
             directory.mkdir(parents=True,exist_ok=False)
             if not o3d.io.write_point_cloud(str(directory/'map.pcd'),cloud(points,self.p['map_voxel_size']),compressed=True):
@@ -366,11 +366,7 @@ class Mapper(Node):
             (directory/'metadata.yaml').write_text(yaml.safe_dump(dict(frame_id='map',parameters=self.p,
                 ground_model=ground,navigation_denoise=denoise_report,
                 map_type='incremental GICP scan-to-map; no loop closure',point_count=len(points))))
-            link = root/'.latest-new'
-            if link.is_symlink():
-                link.unlink()
-            link.symlink_to(directory.name)
-            os.replace(link,root/'latest')
+            publish(root,directory)
             response.success, response.message = True, str(directory)
         except Exception as error:
             response.success, response.message = False, f'{error}; partial files, if any: {directory}'

@@ -227,6 +227,8 @@ if __name__ == '__main__':
         assert endpoints.goals==2
         grid.data[index] = 0
         wait_for(lambda: operator.grids['/global_costmap/costmap'][0].data[index]==0)
+        endpoints.cancel.publish(Empty())
+        wait_for(lambda: not operator.waypoints and not operator.route_paused)
         # A distant map goal may lie beyond the rolling local window.
         _,local = endpoints.grids['/local_costmap/costmap']
         local.info.width = local.info.height = 10
@@ -245,6 +247,8 @@ if __name__ == '__main__':
         endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: 'previous goal failed; fix route and send a new goal' in endpoints.operator_status)
         assert endpoints.goals==4,'Enabling motion retried an aborted goal'
+        endpoints.cancel.publish(Empty())
+        wait_for(lambda: not operator.waypoints and not operator.route_paused)
         endpoints.abort_goal, endpoints.succeed_goal = False,True
         pose.pose.position.x = 0.20
         endpoints.goal.publish(pose)

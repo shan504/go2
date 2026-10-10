@@ -1,34 +1,27 @@
 #!/usr/bin/env python3
 """Copy the current map and remove tiny navigation obstacles; retain full PCD."""
 import argparse
-from datetime import datetime, timezone
-import os
 from pathlib import Path
 import shutil
 import yaml
 from denoise import clean_directory
+from map_library import inside, new_directory, publish, source_name
 
 
 def clean(root):
     root = Path(root).resolve()
-    source = (root/'latest').resolve(strict=True)
-    if source.parent != root:
-        raise ValueError('latest must refer to a map directory inside the maps root')
-    destination = root/('cleaned-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ'))
-    link = root/'.latest-clean'
+    source = inside(root,(root/'latest').resolve(strict=True))
+    destination = new_directory(root,source_name(root,source),'cleaned-')
     try:
         shutil.copytree(source, destination, symlinks=False)
+        # This is a new derived version, not the byte-identical archive copy.
+        (destination/'archive.yaml').unlink(missing_ok=True)
         report = clean_directory(destination)
         metadata = yaml.safe_load((destination/'metadata.yaml').read_text())
         metadata.update(navigation_denoise=report, cleaned_from=str(source))
         (destination/'metadata.yaml').write_text(yaml.safe_dump(metadata))
-        if link.is_symlink():
-            link.unlink()
-        link.symlink_to(destination.name)
-        os.replace(link, root/'latest')
+        publish(root,destination)
     except Exception:
-        if link.is_symlink():
-            link.unlink()
         if destination.exists():
             shutil.rmtree(destination)
         raise

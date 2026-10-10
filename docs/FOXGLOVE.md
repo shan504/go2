@@ -349,3 +349,12 @@ cd ~/go2_nav && git pull --ff-only && bash go2_3d/tools.sh restart-navigation
 
 首次运行和 mapping/localization/navigation 模式切换通过 SSH 完成；
 当前没有把远程重启容器接入 Foxglove。你可将上述面板保存到现有 Foxglove 布局供以后使用。
+
+连续多点：运动关闭时依次完整发布多个 `/goal_pose`（每点“位置＋朝向”两次点击），再启用一次。
+现在每次发布都会追加，当前点真实 `SUCCEEDED` 后才发送下一点；运行中可追加。
+`/operator/status` 的 `current/queued/completed/paused` 显示执行进度。
+新版布局的 `/navigation/waypoints` 以编号显示待执行绿色、当前橙色、暂停红色航点。
+某点失败会保留该点及尾部并暂停；“重试暂停路线”发布 `/navigation/resume`，或SSH执行
+`bash ~/go2_nav/go2_3d/tools.sh resume`。启用按钮不会自动重试失败点。
+取消按钮现为“取消路线”，会清空全部航点；停止运动也清空全部航点。
+定位丢失/容器重启不保留路线。地图命名归档与室内/农场切换见README“多点导航与室内、农场地图保存”。

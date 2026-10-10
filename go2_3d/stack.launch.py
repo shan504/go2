@@ -21,6 +21,7 @@ def generate_launch_description():
     whitelist = '["^/(tf|tf_static|odom|point_cloud2|registered_cloud|map_cloud|map|map_metadata|scan|robot_description|initialpose|goal_pose|plan|local_plan|cmd_vel.*)$","^/camera/image/compressed$","^/(localization|operator|mapping|control|navigation)/.*$","^/(local_costmap|global_costmap)/.*$"]'
     return LaunchDescription([
         DeclareLaunchArgument('mode',default_value='mapping',choices=['mapping','localization','navigation']),
+        DeclareLaunchArgument('map_name',default_value='default'),
         DeclareLaunchArgument('camera',default_value='true'),
         DeclareLaunchArgument('gicp_params',default_value=str(root/'go2_3d/gicp.yaml')),
         DeclareLaunchArgument('port',default_value='8765'),
@@ -43,6 +44,7 @@ def generate_launch_description():
         Node(executable='/usr/bin/python3',name='go2_gicp',output='screen',
              arguments=[str(root/'go2_3d/mapper.py')],
              parameters=[str(root/'go2_3d/gicp.yaml'),LaunchConfiguration('gicp_params'),{'mode':mapper_mode,
+                 'map_name':ParameterValue(LaunchConfiguration('map_name'),value_type=str),
                  'auto_initialize':ParameterValue(LaunchConfiguration('auto_initialize'),value_type=bool),
                  **{key:ParameterValue(LaunchConfiguration(key),value_type=float)
                     for key in ('initial_x','initial_y','initial_z','initial_yaw_degrees')}}]),
