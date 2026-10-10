@@ -236,6 +236,13 @@ Move 1008 请求数/最近速度和本桥对应的 Sport 响应 code。`received
 新版桥的 `cmd_received` 是原始接收数，`cmd_gate_accepted` 是进入命令门控数，
 `cmd_dropped` 按禁用、定位/传感器失效或非有限速度列出丢弃数。
 新字段在导航下次重启后生效，当前容器也可以先运行速度采集。
+若已确认非零 `/cmd_vel` 和本桥非零 Move 请求，下一步读取底盘状态：
+`tools.sh robotcheck 20`；它只查询运动模式、服务列表和内置避障开关，不改模式。
+需要区分 Nav2 与底盘接口时，按 [README 的手动底盘测试](../README.md#已发-move-但没有前进底盘执行检查)
+先 `tools.sh disable` 再 `tools.sh drivecheck`；固定 `0.15 m/s` 两秒后发送 Stop，
+Ctrl+C 也发送 Stop，输出保存到 `runtime/drive-debug.txt`。
+“停止运动＋取消导航”只控制本程序的导航桥；官方遥控器仍可控制机器人。
+独立手动测试过程中用 Ctrl+C 停止，不以 Foxglove 导航桥按钮替代。
 若重启后一直等待 `base_link → map`，先重新初始化 GICP；
 Ctrl+C 后的 ROS context invalid 错误属于关闭阶段，不能据此判断运动桥故障。
 

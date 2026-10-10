@@ -300,6 +300,49 @@ Humble 可能不提供请求的发布者 GID：图中只有一个发布者时明
 ROS 模拟端点测试覆盖真实 Twist/TwistStamped 接口、监测订阅效应、QoS/类型不匹配、仅旋转、
 零值/非有限值、多个发布者时的归属限制和响应配对；该测试不运行完整 Nav2 或驱动实物。
 
+## 已发 Move 但没有前进：底盘执行检查
+
+实机 `motioncheck` 已观察到正确的 `Twist` 链路：`/cmd_vel_nav` 有 100 条非零 XY 速度，
+`/cmd_vel` 有 205 条，桥自身发出 204 次非零 Move；最高前进速度 `0.15 m/s`。
+对应 Sport 响应为 `code=0`，但 `/odom` 最大位移只有 `0.062 m`。
+这排除了“未发布前进速度”的解释，仍需核对原生运动状态；RPC 成功不代表电机实际运动。
+仅有多个 DDS 发布端点也不能证明有命令覆盖。
+
+[宇树官方 Go2W 示例](https://github.com/unitreerobotics/unitree_sdk2/blob/63096d0ac0c5d2dec9d6e0c22cd5233410ca2f36/example/go2w/go2w_sport_client.cpp)
+同样调用 Go2 `SportClient.Move`：ROS 话题 `/api/sport/request`，类型 `unitree_api/msg/Request`，
+`header.identity.api_id=1008`，`parameter='{"x":0.15,"y":0.0,"z":0.0}'`。
+`x/y/z` 是前进、侧向和转向速度；StopMove 为 API `1003`。
+
+保持导航启动终端运行，在第二个 SSH 终端执行以下**手动底盘测试**。机器人应已站稳，前方有空地，
+测试期间不操作遥控器摇杆、不选择目标或点击启用。它直接测试 Sport，绕过地图和 Nav2，
+固定前进 `0.15 m/s`、20 Hz、2 秒，结束或 Ctrl+C 时发送 StopMove：
+
+```bash
+cd ~/go2_nav
+git pull --ff-only
+bash go2_3d/tools.sh disable
+bash go2_3d/tools.sh drivecheck
+```
+
+测试先通过真实 ROS 参数服务确认桥 `enable_control=False`、`allow_motion=True`，
+且 Sport 请求话题存在匹配订阅者；条件不满足不发 Move。执行期间重新检查参数，
+桥被启用或查询失效则停止。它不修改步态、站立状态、控制模式、服务、优先级或内置避障。
+输出保存到 `runtime/drive-debug.txt`，包含本次 Move/Stop 配对响应、底盘实际速度/位移、
+原始 mode/gait/error 和下面三项只读状态。这个手动测试独立于导航桥，途中使用 Ctrl+C 停止；
+Foxglove 的停止按钮停止的是导航桥，不能替代手动测试自己的限时停止。
+
+也可仅读取底盘，不发送 Move/Stop：`bash go2_3d/tools.sh robotcheck 20`。
+它查询 MotionSwitcher CheckMode（`motion_switcher` API1001）、RobotState ServiceList
+（`robot_state` API1003）和内置避障 SwitchGet（`obstacles_avoid` API1002），并观察
+`/sportmodestate` 与 `/lf/sportmodestate`。缺少回复或状态接口会如实报告，不推断禁用状态。
+原始 mode/gait 数字按实际 Go2W 固件保留。输出保存到 `runtime/robot-debug.txt`。
+
+Foxglove “停止运动＋取消导航”只取消本程序的目标并禁用本桥；它不会夺取官方遥控器的控制权。
+软件禁用是否生效应以 `enable_control=False` 的回读为准，不能凭站着不动判断按钮效果。
+隔离 Humble ROS 端点测试覆盖请求字段、响应归属、两秒限时、SIGINT/SIGTERM Stop、
+参数拒绝/服务缺失不发送、执行中重新启用后 Stop，以及只读查询不会发送运动请求。
+这些检查验证工具行为，没有连接实物或证明当前机器人已能自动导航。
+
 ## 清理现有静态地图
 
 已有导航先发布停止运动，再在启动终端按 Ctrl+C。在宿主机执行：

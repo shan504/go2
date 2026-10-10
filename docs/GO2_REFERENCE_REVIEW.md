@@ -133,3 +133,32 @@
 丢弃失效期间命令和响应关联；navcheck 验证该状态及控制器/平滑器速度读取。
 这些测试没有执行真实电机运动。提前耗尽计时已被修正，当前实机是否还有零速度、
 传感器门控或 Sport 执行问题，必须依据新增状态及实际位移判断。
+
+## 非零速度已送达后的官方接口核对
+
+后续上传的 `motioncheck` 把失败窗口完整覆盖：控制器 100 条非零 XY、平滑器 205 条，
+桥自身 204 次非零 Move，最高 `vx=0.15 m/s`；配对响应 code=0，`/odom` 最大位移仅 0.062m。
+因此不再把此次失败归因于速度话题未接通。遥控器能前进说明底盘有运动能力；
+目前仍缺原生 mode/gait/error/velocity 和控制服务状态，不能确定是哪一个底盘条件阻断执行。
+
+核对宇树官方仓库固定版本：
+
+| 来源 | 固定提交 | 核对结果 |
+| --- | --- | --- |
+| [unitree_sdk2 Go2W 示例](https://github.com/unitreerobotics/unitree_sdk2/blob/63096d0ac0c5d2dec9d6e0c22cd5233410ca2f36/example/go2w/go2w_sport_client.cpp) | `63096d0a` | Go2W 使用 Go2 SportClient 的 Move/StopMove |
+| [unitree_sdk2_python Go2W 示例](https://github.com/unitreerobotics/unitree_sdk2_python/blob/814556d15970dd2ecf1c9984e845ca02ab07e206/example/go2w/high_level/go2w_sport_client.py) | `814556d1` | 同样调用 Move(vx, vy, yaw)；默认客户端不启用 lease |
+| [unitree_ros2](https://github.com/unitreerobotics/unitree_ros2/tree/668d1ec5a05d1c38d3306bdca7d59f2ba3581a88) | `668d1ec5` | ROS Sport 请求 Move API1008 的 JSON x/y/z 与当前桥一致 |
+
+Go2W 不因此需要改成另一个轮速话题。RPC code0 不等于运动证明；多个发现端点不等于已观察到覆盖。
+未据此改变 lease、优先级、站立、运动模式或避障开关。
+
+`robotcheck.py` 只允许以下服务/API 组合：`motion_switcher/1001` CheckMode、
+`robot_state/1003` ServiceList、`obstacles_avoid/1002` SwitchGet。API 必须与服务一起核对：
+1003 在 sport 上是 StopMove，在 robot_state 上才是只读查询。回复必须同时匹配请求 ID 和 API。
+动态订阅原生 SportModeState，保留 Go2W 原始枚举、实测速度及位移；缺少接口不假定为零速度。
+
+用户明确要求官方前进命令后新增 `drivecheck.py`：先确认导航桥已禁用且处于导航配置，
+手动发固定 0.15m/s、20Hz、两秒 Move1008，正常、异常或 SIGINT/SIGTERM 退出后发 Stop1003。
+读取底盘状态与上述只读 RPC，隔离 Nav2 与底盘执行。它不自动切换任何底盘模式。
+Humble/FastDDS 隔离 ROS 模拟验证请求、响应关联、拒绝与停止路径；未连接实物，
+没有验证轮子真实响应或使用机器人上的 CycloneDDS 执行此测试。
