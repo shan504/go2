@@ -2,6 +2,7 @@
 """Reuse DDS adapter, adding a mandatory live-localization gate for motion."""
 import sys
 import time
+import math
 from collections import OrderedDict
 sys.path.insert(0, '/opt/go2_project/patches/dds')
 import rclpy
@@ -23,6 +24,11 @@ class LocalizedBridge(Go2EduBridge):
         self.last_move = None
         self.own_requests = OrderedDict()
         self.last_response = None
+        # Keep counters and one sample, rather than an unbounded command log.
+        self.cmd_received = self.cmd_nonzero = self.cmd_gate_accepted = 0
+        self.cmd_dropped = dict.fromkeys(('motion_not_allowed','motion_disabled',
+            'localization_invalid_or_stale','odometry_or_cloud_stale','nonfinite'),0)
+        self.last_raw_cmd = None
         super().__init__()
         self.declare_parameter('allow_motion',False,ParameterDescriptor(read_only=True))
         self.motion_allowed = self.get_parameter('allow_motion').value
@@ -43,10 +49,36 @@ class LocalizedBridge(Go2EduBridge):
                 all(t is not None and 0 <= now-t < 1.0 for t in (self.odom_received,self.cloud_received)))
 
     def on_cmd(self, message):
+        now = time.monotonic()
+        command = (message.linear.x,message.linear.y,message.angular.z)
+        self.cmd_received += 1
+        self.last_raw_cmd = (now,command)
+        finite = all(math.isfinite(value) for value in command)
+        self.cmd_nonzero += int(finite and any(abs(value)>0.001 for value in command))
+        if not finite:
+            reason = 'nonfinite'
+            # Match CommandGate's invalid-command behavior: do not keep an
+            # earlier velocity alive after an invalid command arrives.
+            self.gate.command = self.gate.received_at = None
+        elif not self.motion_allowed:
+            reason = 'motion_not_allowed'
+        elif not self.gate.enabled:
+            reason = 'motion_disabled'
+        elif (not self.localization_valid or self.localization_received is None or
+              not 0 <= now-self.localization_received < 0.5):
+            reason = 'localization_invalid_or_stale'
+        elif not all(t is not None and 0 <= now-t < 1.0
+                     for t in (self.odom_received,self.cloud_received)):
+            reason = 'odometry_or_cloud_stale'
+        else:
+            reason = None
         # Commands arriving during a localization/sensor outage are discarded,
         # so recovery requires a new velocity rather than replaying that backlog.
-        if self.motion_inputs_fresh(time.monotonic()):
+        if reason is None:
+            self.cmd_gate_accepted += 1
             super().on_cmd(message)
+        else:
+            self.cmd_dropped[reason] += 1
 
     def remember_request(self, request_id, api_id):
         self.own_requests[request_id] = api_id
@@ -101,6 +133,11 @@ class LocalizedBridge(Go2EduBridge):
                 f'cloud_age={cloud_age:.2f}s cmd_age={command_age:.2f}s cmd={command}; '
                 f'Move_requests={self.move_requests} nonzero_Move_requests={self.nonzero_move_requests} '
                 f'Stop_requests={self.stop_requests}')
+        text += (f'; cmd_received={self.cmd_received} cmd_nonzero={self.cmd_nonzero} '
+                 f'cmd_gate_accepted={self.cmd_gate_accepted} cmd_dropped={self.cmd_dropped}')
+        if self.last_raw_cmd is not None:
+            received,velocity = self.last_raw_cmd
+            text += f'; last_raw_cmd_age={age(received):.2f}s last_raw_cmd={list(velocity)}'
         if self.last_move is not None:
             received,velocity = self.last_move
             text += f'; last_Move_age={age(received):.2f}s last_Move={list(velocity)}'

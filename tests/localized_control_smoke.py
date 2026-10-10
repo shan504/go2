@@ -89,6 +89,8 @@ try:
     wait_for(lambda: bridge.localization_received is not None and bridge.cloud_received is not None)
     spin(0.25)
     assert bridge.move_requests==0,'Disabled gate forwarded a command'
+    assert bridge.cmd_received>0 and bridge.cmd_nonzero>0,'Raw disabled commands not observed'
+    assert bridge.cmd_dropped['motion_disabled']>0 and bridge.cmd_gate_accepted==0
     robot.command = None
     spin(0.2)  # Drain in-flight source messages before checking enable reset.
     bridge.set_parameters([Parameter('enable_control',value=True)])
@@ -103,6 +105,8 @@ try:
     moves = [r for r in robot.requests if r.header.identity.api_id==1008]
     assert moves and abs(json.loads(moves[-1].parameter)['x']-0.15)<1e-6
     assert json.loads(moves[-1].parameter)['y']==0.0
+    assert bridge.cmd_gate_accepted>0 and bridge.last_raw_cmd[1][0]==0.8
+    assert 'cmd_received=' in robot.status and 'last_raw_cmd=[0.8, 0.0, 0.0]' in robot.status
     # A response from another SDK client must not replace our diagnostic state.
     unrelated = Response()
     unrelated.header.identity.id,unrelated.header.identity.api_id = 1,1008
@@ -113,8 +117,11 @@ try:
     robot.valid = False
     wait_for(lambda: bridge.stop_requests>=1)
     count = bridge.move_requests
+    received,dropped,accepted = bridge.cmd_received,bridge.cmd_dropped['localization_invalid_or_stale'],bridge.cmd_gate_accepted
     spin(0.3)
     assert bridge.move_requests==count,'Invalid localization kept sending Move'
+    assert bridge.cmd_received>received and bridge.cmd_dropped['localization_invalid_or_stale']>dropped
+    assert bridge.cmd_gate_accepted==accepted,'Invalid localization accepted commands into gate'
     wait_for(lambda: 'gate=localization invalid or stale' in robot.status)
     robot.valid,robot.command = True,None
     spin(0.6)
@@ -129,11 +136,25 @@ try:
     stops = bridge.stop_requests
     wait_for(lambda: bridge.stop_requests>stops)
     count = bridge.move_requests
+    received,dropped,accepted = bridge.cmd_received,bridge.cmd_dropped['odometry_or_cloud_stale'],bridge.cmd_gate_accepted
     spin(0.2)
     assert bridge.move_requests==count,'Stale cloud kept sending Move'
+    assert bridge.cmd_received>received and bridge.cmd_dropped['odometry_or_cloud_stale']>dropped
+    assert bridge.cmd_gate_accepted==accepted,'Stale cloud accepted commands into gate'
     wait_for(lambda: 'gate=odometry or cloud stale' in robot.status)
     assert bridge.cloud_received is not None
-    print('PASS localized motion bridge: disabled hold, fresh-command requirement, Move 1008 bounded JSON, correlated response codes, localization/cloud loss stop without replay')
+    robot.cloud_enabled = True
+    wait_for(lambda: bridge.move_requests>count)
+    dropped = bridge.cmd_dropped['nonfinite']
+    robot.command.linear.x = float('nan')
+    stops = bridge.stop_requests
+    wait_for(lambda: bridge.cmd_dropped['nonfinite']>dropped and bridge.stop_requests>stops)
+    count,accepted = bridge.move_requests,bridge.cmd_gate_accepted
+    spin(0.2)
+    assert bridge.move_requests==count and bridge.cmd_gate_accepted==accepted,'Nonfinite commands entered motion gate'
+    assert bridge.cmd_received==bridge.cmd_gate_accepted+sum(bridge.cmd_dropped.values())
+    assert set(bridge.cmd_dropped)=={'motion_not_allowed','motion_disabled','localization_invalid_or_stale','odometry_or_cloud_stale','nonfinite'}
+    print('PASS localized motion bridge: raw receive/drop telemetry, disabled hold, fresh-command requirement, Move 1008 bounded JSON, correlated responses, invalid localization/cloud/nonfinite stop without replay')
 finally:
     executor.shutdown()
     bridge.destroy_node()

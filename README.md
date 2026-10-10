@@ -274,6 +274,32 @@ bash go2_3d/tools.sh inflation-5cm
 已发布 Move 请求或响应 code=0 也不能代替真实里程计/现场运动确认。
 `tools.sh enable/disable` 与 Foxglove 同走 `/control/enable`，使暂存目标启动与取消行为一致。
 
+目标已接受、控制器收到路径却没有移动时，先记录完整速度链路。保持导航启动终端运行，
+在第二个 SSH 终端执行：
+
+```bash
+cd ~/go2_nav
+git pull --ff-only
+bash go2_3d/tools.sh motioncheck 30
+```
+
+看到 `READY` 后再在 Foxglove 选择一个**新目标**并启用运动，30 秒结束后查看输出，
+完整记录同时保存到 `runtime/velocity-debug.txt`。采集不写目标、速度、参数或机器狗模式，
+可以直接读取当前容器，无需重建镜像、地图或重启导航。它用 rclpy 直接读取服务，绕过 ROS CLI daemon。
+先冻结速度端点，再订阅：原生 Humble 控制器可能仅在有订阅者时发布，监测节点本身不能
+被当作正常的 `velocity_smoother` 输入。输出包含节点名、实际消息类型/QoS、控制器与平滑器
+生命周期及实际参数，以及 `/cmd_vel_nav → /cmd_vel → /api/sport/request` 的分段计数。
+前进/侧移、仅旋转、零速度分别统计；Sport API 1008 的 `x/y/z` 对应 `vx/vy/yaw_rate`。
+响应按观察到的请求 ID 和 API 配对，再与 `/odom` 位移比较。
+Humble 可能不提供请求的发布者 GID：图中只有一个发布者时明确标记为推断，
+多个发布者时保持 `UNATTRIBUTED`；本桥拥有的请求/响应以 `/control/status` 计数为准。
+
+新版桥还报告 `cmd_received`、`cmd_nonzero`、`cmd_gate_accepted`、`cmd_dropped` 及最近原始速度，
+能区分未收到与收到后被运动禁用、定位或传感器时效拦住。已经运行的旧桥需要下次导航重启
+才加载这些新字段；速度采集本身可立即使用，不依赖新字段。
+ROS 模拟端点测试覆盖真实 Twist/TwistStamped 接口、监测订阅效应、QoS/类型不匹配、仅旋转、
+零值/非有限值、多个发布者时的归属限制和响应配对；该测试不运行完整 Nav2 或驱动实物。
+
 ## 清理现有静态地图
 
 已有导航先发布停止运动，再在启动终端按 Ctrl+C。在宿主机执行：

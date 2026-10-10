@@ -224,12 +224,18 @@ Nav2 action 不可用时，启用与目标操作会拒绝并附上最新启动�
 “启用运动”只是允许运动桥执行 Nav2 的速度命令，不会自己产生前进命令。
 `GridBased failed to generate a valid path` 表示规划失败。
 已收到路径后报 `Failed to make progress` 则需检查速度执行链路；status=6 仅表示 action 已中止，
-不能单凭它判断地图有问题。新目标执行期间，第二个终端运行 `tools.sh navcheck X Y`，
-同时读取 `/cmd_vel_nav`、`/cmd_vel`、`/control/status` 和 `/odom`。
+不能单凭它判断地图有问题。第二个 SSH 终端先运行 `tools.sh motioncheck 30`，
+看到 `READY` 后再选择新目标、启用运动；采集覆盖目标开始到失败的整个窗口，
+避免在目标中止后读取到零值而误判。输出同时保存到 `runtime/velocity-debug.txt`。
+它检查真实端点、消息类型/QoS、平滑器生命周期、`/cmd_vel_nav`、`/cmd_vel`、
+Sport 请求/配对响应、桥状态和 `/odom`，不发送任何速度或修改参数。
 也可添加“原始消息 / Raw Messages”面板选择 `/control/status`：它显示桥被哪个条件阻断、
 Move 1008 请求数/最近速度和本桥对应的 Sport 响应 code。`received zero /cmd_vel` 表示桥接到的是零速度；
 `forwarding Move requests` 及新鲜的 `last_Move_age` 表示已发请求，仍需真实运动确认。
 没有 Sport 响应不能单独证明失败；响应只按本桥请求 ID 关联，不混入其他 SDK 客户端。
+新版桥的 `cmd_received` 是原始接收数，`cmd_gate_accepted` 是进入命令门控数，
+`cmd_dropped` 按禁用、定位/传感器失效或非有限速度列出丢弃数。
+新字段在导航下次重启后生效，当前容器也可以先运行速度采集。
 若重启后一直等待 `base_link → map`，先重新初始化 GICP；
 Ctrl+C 后的 ROS context invalid 错误属于关闭阶段，不能据此判断运动桥故障。
 
