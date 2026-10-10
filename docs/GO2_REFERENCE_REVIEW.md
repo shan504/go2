@@ -254,3 +254,23 @@ RotateToGoal与实际XY目标容差对齐，避免提前进入只转向窗口。
 通过有限数值参数传递XYZ和yaw重启。读取失败不停止原容器；重启期间保持机器人静止。
 该命令解决已前进42厘米后不能再用原点初始化的问题，不重置地图、不自动启用或重发目标。
 真实ROS TF回归覆盖有效位姿、无效定位及过期TF拒绝；隔离shell回归核对启动参数。
+
+## 实机到点但进展超时：巡检只要求位置到达
+
+用户后续确认已走到指定目标，日志仍为 `Failed to make progress`、Nav2 ABORTED。
+Humble SimpleGoalChecker 先检查XY，再检查yaw；原SDK位置容差0.25m、yaw容差0.25rad。
+SimpleProgressChecker只看平面位移，原地转向不算进展，10秒后会抛出该错误。
+截图没有末端位姿数据，不能仅凭截图断定朝向是唯一原因。
+
+用户明确选择“到指定位置就算成功，终点朝向不限”。配置现将SimpleGoalChecker设为
+XY半径0.30m、yaw=π、stateful=false；其角差取最短路径，范围[-π,π]，因此任何朝向均满足。
+每次检查当前XY而非锁存曾经进入的范围；DWB不再加载RotateToGoal。
+行为树显式传goal_checker_id，消除未指定判定器警告。目标外进展计时保留，不伪造成功。
+
+`tests/goal_checker_smoke.py` 使用生成参数调用实际SimpleGoalChecker：实机镜像链接已安装
+官方库；云端编译未修改的上游实现、原版nav2_core/utility头文件、实际rclcpp参数和TF数学。
+云端仅为未使用的Costmap2DROS参数提供类型前置声明，未模拟到达算法。
+angles头文件来自官方ros/angles提交 `a96224f9ab3ac51fe8fd981c1e1554528dc4345a`。
+回归复现旧配置拒绝位置内90°朝向，验证任意朝向的30厘米内成功、边界外/远处/对角距离超限
+拒绝、目标重置。ROS action回归核对真正的SUCCEEDED/ABORTED文字和末端XY误差，
+近点ABORTED不会被重写成成功。新规则的实机成功状态仍待确认。

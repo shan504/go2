@@ -1,5 +1,6 @@
 """Validate generated navigation/URDF copies against an actual SDK checkout."""
 import importlib.util
+import math
 import os
 from pathlib import Path
 import yaml
@@ -15,7 +16,7 @@ before = {p:p.read_bytes() for p in sdk.rglob('*') if p.is_file()}
 module.get_package_share_directory = lambda package: str(sdk)
 module.main()
 params = yaml.safe_load(Path('/runtime/config/nav2_3d.yaml').read_text())
-from motion_profile import LINEAR_SPEED, YAW_SPEED, LINEAR_ACCELERATION, TRAJECTORY_TIME
+from motion_profile import LINEAR_SPEED, YAW_SPEED, LINEAR_ACCELERATION, TRAJECTORY_TIME, ARRIVAL_RADIUS
 follow = params['controller_server']['ros__parameters']['FollowPath']
 smoother = params['velocity_smoother']['ros__parameters']
 assert follow['max_vel_x'] == follow['max_speed_xy'] == smoother['max_velocity'][0] == LINEAR_SPEED == 0.30
@@ -30,6 +31,11 @@ assert LINEAR_ACCELERATION * TRAJECTORY_TIME >= LINEAR_SPEED
 assert follow['acc_lim_x'] == smoother['max_accel'][0] == LINEAR_ACCELERATION
 assert follow['decel_lim_x'] == smoother['max_decel'][0] == -LINEAR_ACCELERATION
 assert follow['xy_goal_tolerance'] == params['controller_server']['ros__parameters']['general_goal_checker']['xy_goal_tolerance']
+checker = params['controller_server']['ros__parameters']['general_goal_checker']
+assert checker['xy_goal_tolerance'] == ARRIVAL_RADIUS == 0.30
+assert checker['yaw_goal_tolerance'] == math.pi and checker['stateful'] is False
+assert 'RotateToGoal' not in follow['critics']
+assert params['controller_server']['ros__parameters']['progress_checker']['movement_time_allowance'] == 10.0
 assert 'amcl' not in params
 for name in ('local_costmap','global_costmap'):
     cfg = params[name][name]['ros__parameters']
@@ -62,5 +68,6 @@ assert params['bt_navigator']['ros__parameters']['robot_base_frame'] == 'base_fo
 assert params['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml'].endswith('/go2_3d/navigate.xml')
 behavior = ET.parse(root/'go2_3d/navigate.xml')
 assert not list(behavior.iter('Spin')) and not list(behavior.iter('BackUp'))
+assert list(behavior.iter('FollowPath'))[0].get('goal_checker_id') == 'general_goal_checker'
 assert all(p.read_bytes() == content for p,content in before.items())
-print('PASS SDK configuration: matched 0.30m/s controller/smoother envelope, two forward samples reachable from rest, XY goal-window alignment, no AMCL, protected SDK source unchanged')
+print('PASS SDK configuration: matched 0.30m/s envelope and forward samples, 0.30m position-only arrival with explicit goal checker, no terminal rotation, genuine stall timeout retained, protected SDK source unchanged')

@@ -206,7 +206,8 @@ ros2 lifecycle get --no-daemon /planner_server
 
 - 目标话题 `/goal_pose`，类型 `geometry_msgs/msg/PoseStamped`，参考系 `map`。
 - 在设置的“发布”分组选择“位姿 / Pose”，话题为 `/goal_pose`；或长按场景右侧发布工具选择 **Publish pose**。
-- 再单击工具按钮启用它；在已观察到的空地单击一次，移动鼠标指定到达朝向，再单击一次发布。
+- 再单击工具按钮启用它；在已观察到的空地单击一次，再移动鼠标、单击一次形成箭头并发布。
+  巡检按位置到达：当前距离目标≤30厘米即可，终点不要求对齐这个箭头。
 - 首次选近距离目标，观察 `/plan`、局部障碍和机器人响应。
 
 新增的 `operator_bridge.py` 把 `/goal_pose` 转换为 `/navigate_to_pose` action。
@@ -338,6 +339,13 @@ cd ~/go2_nav && git pull --ff-only && bash go2_3d/tools.sh restart-navigation
 重启期间不移动狗，也不要重新用 `0 0 0` 初始化已经前进后的位姿。
 确认 `/localization/valid=true` 和 Nav2 启动成功后，重新单击前方1～1.5米自由目标和朝向，
 再点“启用运动”。保留位姿不会保留旧目标或自动启用；读取失败保留原容器并报错。
+
+直行迈步和走到指定目标已有用户现场确认。旧判定还要求约14°朝向精度，
+到点后的原地转向会被平面进展检查判成超时；当次日志未包含末端误差，无法确认全部原因。
+按用户选择，现为当前位置距目标≤30厘米即到达、朝向不限，取消末端强制转向。
+更新并保留当前位置重启后重新发目标。`/operator/status` 的成功文字为
+`action status=4 (SUCCEEDED); reached waypoint`，同时显示末端XY误差；
+真实Nav2失败仍为 `ABORTED`，不会仅凭靠近目标改成成功。
 
 首次运行和 mapping/localization/navigation 模式切换通过 SSH 完成；
 当前没有把远程重启容器接入 Foxglove。你可将上述面板保存到现有 Foxglove 布局供以后使用。

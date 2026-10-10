@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Foxglove publish-panel operations and /goal_pose -> Nav2 action gateway."""
 import copy
+import math
 import time
 import rclpy
 from rclpy.node import Node
@@ -15,6 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener, TransformException
 from geometry import pose_matrix, grid_cell, quaternion_from_matrix, planar_pose
+from motion_profile import ARRIVAL_RADIUS
 
 
 class Operator(Node):
@@ -251,7 +253,7 @@ class Operator(Node):
         goal.behavior_tree = '/opt/go2_project/go2_3d/navigate.xml'
         self.goal_pending,self.cancel_requested = True,False
         future = self.action.send_goal_async(goal)
-        future.add_done_callback(self.goal_response)
+        future.add_done_callback(lambda result: self.goal_response(result,goal.pose))
         self.report('Map goal sent to Nav2 action')
 
     def validate_goal(self,message):
@@ -287,7 +289,7 @@ class Operator(Node):
                 reason = 'unknown' if value < 0 else 'occupied' if value == 100 else 'inside obstacle clearance'
                 raise ValueError(f'{topic}: goal ({xy[0]:.2f}, {xy[1]:.2f}) {reason}, cell={index} value={value}')
 
-    def goal_response(self,future):
+    def goal_response(self,future,goal_pose):
         self.goal_pending = False
         try:
             handle = future.result()
@@ -296,20 +298,35 @@ class Operator(Node):
                 return
             self.goal_handle = handle
             self.last_goal_status = None
-            handle.get_result_async().add_done_callback(self.goal_result)
+            handle.get_result_async().add_done_callback(lambda result: self.goal_result(result,goal_pose))
             self.report('Nav2 accepted goal')
             if self.cancel_requested or not self.localized():
                 self.on_cancel(Empty())
         except Exception as error:
             self.report(f'Nav2 goal request failed: {error}')
 
-    def goal_result(self,future):
+    def goal_error_text(self,goal_pose):
+        try:
+            tf = self.buffer.lookup_transform('map','base_footprint',Time())
+            age = (self.get_clock().now()-Time.from_msg(tf.header.stamp)).nanoseconds/1e9
+            if not -0.1 <= age <= 0.5:
+                return '; final map pose unavailable (stale TF)'
+            p = tf.transform.translation
+            error = math.hypot(p.x-goal_pose.pose.position.x,p.y-goal_pose.pose.position.y)
+            return f'; final XY error={error:.3f}m; arrival radius={ARRIVAL_RADIUS:.2f}m; final heading unrestricted'
+        except TransformException:
+            return '; final map pose unavailable (TF lookup failed)'
+
+    def goal_result(self,future,goal_pose):
         try:
             status = future.result().status
             self.last_goal_status = status
             text = f'Nav2 goal completed: action status={status}'
-            if status==6:
+            if status==4:
+                text += ' (SUCCEEDED); reached waypoint'
+            elif status==6:
                 text += ' (ABORTED); no active goal; enabling motion does not retry the failed goal'
+            text += self.goal_error_text(goal_pose)
             self.report(text)
         except Exception as error:
             self.report(f'Nav2 result failed: {error}')

@@ -1,10 +1,13 @@
 """3D navigation envelope, based on the successful 0.30m/s Go2 hardware test."""
+import math
+
 LINEAR_SPEED = 0.30
 YAW_SPEED = 0.30
 LINEAR_ACCELERATION = 0.40
 YAW_ACCELERATION = 0.60
 TRAJECTORY_TIME = 1.20
 FORWARD_SAMPLES = 2
+ARRIVAL_RADIUS = 0.30
 
 
 def configure_navigation(nav):
@@ -23,10 +26,16 @@ def configure_navigation(nav):
                   acc_lim_theta=YAW_ACCELERATION,
                   decel_lim_x=-LINEAR_ACCELERATION, decel_lim_y=-LINEAR_ACCELERATION,
                   decel_lim_theta=-YAW_ACCELERATION)
-    # Avoid entering RotateToGoal's translation-stop window before the actual
-    # goal checker accepts XY arrival (the SDK preset has mismatched values).
+    # Patrol waypoints mean reaching a location; the user does not require a
+    # final heading. SimpleGoalChecker uses shortest-angle yaw errors in [-pi,
+    # pi], so pi accepts every heading. Still check current XY on every call.
     goal_checker = nav['controller_server']['ros__parameters']['general_goal_checker']
+    goal_checker.update(xy_goal_tolerance=ARRIVAL_RADIUS,
+                        yaw_goal_tolerance=math.pi, stateful=False)
     follow['xy_goal_tolerance'] = goal_checker['xy_goal_tolerance']
+    # RotateToGoal latches its own near-goal state and forbids translation.
+    # Position-only waypoints do not need that terminal rotation stage.
+    follow['critics'] = [name for name in follow['critics'] if name != 'RotateToGoal']
     smoother = nav['velocity_smoother']['ros__parameters']
     smoother.update(max_velocity=[LINEAR_SPEED, 0.0, YAW_SPEED],
                     min_velocity=[0.0, 0.0, -YAW_SPEED],

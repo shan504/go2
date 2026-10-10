@@ -40,6 +40,7 @@ class TestEndpoints(Node):
         self.goals, self.cancels = 0,0
         self.last_goal = None
         self.abort_goal = False
+        self.succeed_goal = False
         self.reject_enable = False
         self.add_on_set_parameters_callback(lambda parameters: SetParametersResult(
             successful=not (self.reject_enable and any(p.name=='enable_control' and p.value for p in parameters)),
@@ -94,6 +95,9 @@ class TestEndpoints(Node):
         self.last_goal = handle.request.pose
         if self.abort_goal:
             handle.abort()
+            return NavigateToPose.Result()
+        if self.succeed_goal:
+            handle.succeed()
             return NavigateToPose.Result()
         deadline = time.monotonic()+15
         while time.monotonic() < deadline:
@@ -241,7 +245,22 @@ if __name__ == '__main__':
         endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: 'previous goal failed; fix route and send a new goal' in endpoints.operator_status)
         assert endpoints.goals==4,'Enabling motion retried an aborted goal'
-        print('PASS Nav2 gateway: disabled waypoint held >10s, confirmed enable dispatch, refusal/cancel/localization/revalidation, fixed-map action and no failed-goal retry')
+        endpoints.abort_goal, endpoints.succeed_goal = False,True
+        pose.pose.position.x = 0.20
+        endpoints.goal.publish(pose)
+        wait_for(lambda: endpoints.goals==5 and operator.last_goal_status==4 and operator.goal_handle is None)
+        wait_for(lambda: '(SUCCEEDED); reached waypoint' in endpoints.operator_status)
+        assert 'final XY error=0.200m' in endpoints.operator_status
+        assert 'final heading unrestricted' in endpoints.operator_status
+        # Nearness is diagnostic only: never relabel a genuine Nav2 abort as a
+        # success just because the last TF lies inside the arrival radius.
+        endpoints.abort_goal, endpoints.succeed_goal = True,False
+        endpoints.goal.publish(pose)
+        wait_for(lambda: endpoints.goals==6 and operator.last_goal_status==6 and operator.goal_handle is None)
+        wait_for(lambda: '(ABORTED)' in endpoints.operator_status)
+        assert 'final XY error=0.200m' in endpoints.operator_status
+        assert '(SUCCEEDED)' not in endpoints.operator_status
+        print('PASS Nav2 gateway: disabled hold/enable/cancel/revalidation, true SUCCEEDED and ABORTED labels with current XY error, no fabricated success or failed-goal retry')
     finally:
         executor.shutdown()
         spinner.join(timeout=3)
