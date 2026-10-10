@@ -390,7 +390,9 @@ MCF 社区示例指出 StandUp 后可能仍处于锁定站立，建议在 Move �
 获得匹配 code0 后等 0.5 秒，再回读桥参数，发送原来 0.15m/s、两秒的 Sport Move 并 Stop。
 不发送 StandUp、步态、MotionSwitcher、避障开关或速度档位命令，不自动改变导航桥启动行为。
 准备动作被拒、缺少回复或被中断时发送 Stop，不继续发送 Move。
-该准备步骤是否能解决实际不迈步，仍需现场验证：
+实机已验证：BalanceStand 和 39 次 Move 都回复 code0，但仍只探身，最大原生 XY 位移约
+0.086m。因此这项准备动作没有解决当前问题，不再把它作为下一次测试或导航启动步骤。
+保留命令仅用于明确需要核对姿态准备的场景：
 
 ```bash
 cd ~/go2_nav
@@ -402,6 +404,35 @@ bash go2_3d/tools.sh drivecheck-balanced
 保持导航启动终端运行，在空地、机器人已站稳、遥控器摇杆回中时测试；期间不点启用。
 输出保存到 `runtime/balanced-drive-debug.txt`。命令会调整为平衡站立准备状态；
 不在测试结束后强制恢复一个未知的原始站立状态。正常结束和 Ctrl+C 发送 StopMove。
+
+## 低速不迈步：按官方示例验证 0.30m/s
+
+之前导航、原生 Sport、原生避障和 BalanceStand 测试都限制为 `0.15m/s`。
+收到匹配回复证明请求被处理，却不能证明这个速度能让当前固件从站立开始迈步。
+官方[Go2 四足示例](https://github.com/unitreerobotics/unitree_sdk2_python/blob/814556d15970dd2ecf1c9984e845ca02ab07e206/example/go2/high_level/go2_sport_client.py)
+前进使用 `Move(0.3,0,0)`。另一个 Go2 的
+[实机记录 #26](https://github.com/armwaheed/mappo-arm-cloud-physical-ai/issues/26)
+显示持续约 `0.137m/s` 时停滞、约 `0.295m/s` 时能行走；该记录也明确修正了最初
+“0.35 是最低阈值”的说法。它是另一台带负载机器人的实验，不能直接确定本机的起步阈值。
+
+显式 `drivecheck-walk` 只将直线测试速度改为 `0.30m/s`，20Hz、最多两秒、名义距离 0.60m。
+不发送 BalanceStand、StandUp、步态、遥控器开关、避障开关或运动模式切换，
+不自动修改 Nav2 的 `0.15m/s` 上限，也不在桥后端把规划器的小速度强行放大。
+如果这个测试真正迈步，随后应在规划器、平滑器和桥中统一配置经验证的速度范围；
+仅增大某一环节仍可能被其他环节限到 0.15m/s。
+
+保持导航启动终端运行，在第二个 SSH 终端操作。机器人已经站稳、导航运动保持禁用，
+遥控器摇杆回中，前方至少留出 1.5m 空地，不点击启用运动：
+
+```bash
+cd ~/go2_nav && git pull --ff-only && bash go2_3d/tools.sh drivecheck-walk
+```
+
+命令要求新鲜 `/odom`（`odom -> base_link`），记录 Move 期间的净 XY 位移以及相对于
+起始朝向的前进/侧向位移。正常、SIGINT/SIGTERM、传感器超时或运行中桥被启用时均发 Stop，
+Stop 缺少匹配确认会明确报错。结果保存到 `runtime/walking-drive-debug.txt`。
+机身晃动也会产生里程计位移，仍需报告是否真的迈步和走出距离。隔离 ROS 验证只覆盖
+协议、遥测和退出路径，不能证明实机问题已经解决；0.30m/s 也不是所有 Go2 的保证阈值。
 
 ## 清理现有静态地图
 

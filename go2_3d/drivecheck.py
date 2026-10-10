@@ -19,6 +19,7 @@ class DriveRefused(RuntimeError):
 
 
 class ManualDrive(Node):
+    FORWARD_SPEED = 0.15
     DESCRIPTION = 'MANUAL direct Sport diagnostic, not navigation: vx=0.15m/s, vy=0, yaw=0, 20Hz, 2s; automatic StopMove.'
     def __init__(self):
         super().__init__('go2_bounded_manual_drivecheck')
@@ -86,7 +87,7 @@ class ManualDrive(Node):
         pass
 
     def publish_move(self):
-        self.publish_request(1008,json.dumps({'x':0.15,'y':0.0,'z':0.0}))
+        self.publish_request(1008,json.dumps({'x':self.FORWARD_SPEED,'y':0.0,'z':0.0}))
 
     def stop_drive(self, spin):
         if self.moves and rclpy.ok():

@@ -204,3 +204,31 @@ API1034 的 code0/data='' 不提供可解释状态，不能认定其在该固件
 等待0.5秒、重新核对禁用桥，然后保持0.15m/s两秒 Move并Stop。
 匹配失败、缺少准备回复和SIGINT/SIGTERM均Stop，未获准备确认不发Move。
 隔离ROS验证协议与退出路径，不据模拟成功声称机器人已能迈步。
+
+## 平衡准备失败后：核对低速起步响应
+
+用户实机执行 `drivecheck-balanced`：一次 BalanceStand、39 次 Move、一次 Stop 都匹配 code0，
+最大原生 XY 位移约 0.086m，仍只前探、没有迈步。该准备假设没有解决当前故障，
+不把 BalanceStand 自动加入导航，也不继续重复 0.15m/s 的准备动作组合。
+
+重新在线检索并读取以下案例：
+
+- [社区 #30](https://github.com/legion1581/unitree_webrtc_connect/issues/30)：持续发送 Move
+  解决单次速度指令后只走几步的问题。本机已经 20Hz 持续发送，不符合其原因。
+- [社区 #17](https://github.com/legion1581/unitree_webrtc_connect/issues/17)：StandUp 后
+  Move 无效，BalanceStand 解锁。本机已验证该步骤仍不迈步，不能据此认定关节锁定。
+- [官方 SDK 仓库 #175](https://github.com/unitreerobotics/unitree_sdk2_python/issues/175)：
+  用户报告 StandUp 后暂不响应；没有官方就绪状态解答。`_CallNoReply` 本地返回0与本项目
+  按 Request ID/API 配对的回复0不同，两者都不等于实际行走。
+- [另一台 Go2 的实机 #26](https://github.com/armwaheed/mappo-arm-cloud-physical-ai/issues/26)：
+  持续约0.137m/s停滞，约0.295m/s行走3m；原先猜测0.35阈值已被其记录反驳。
+  [#42](https://github.com/armwaheed/mappo-arm-cloud-physical-ai/issues/42) 还说明不同方向、
+  从站立起步和已经迈步时的响应不同。负载、温度、位置和固件是混杂因素，阈值不通用。
+
+本项目将导航和所有手动测试都限制在0.15m/s，此前遗漏了起步速度这一变量。
+官方固定提交 `814556d1` 的 Go2 Sport 示例向前为 `Move(0.3,0,0)`。
+新增显式 `drivecheck-walk`：固定0.30m/s、20Hz、最多两秒、Stop配对确认；
+不改变姿态、步态、控制权或避障设置，不修改导航速度上限，不做速度后置放大。
+Move前及期间检查新鲜 odom，记录命令期间的净位移与起始朝向投影；
+Stop缺失确认、Move非零错误、传感器超时、SIGINT/SIGTERM和桥再次启用均有明确退出路径。
+模拟测试验证这些路径及“全回复0但里程计不变”的情况；本机是否可在0.30m/s迈步尚需现场确认。
