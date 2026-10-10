@@ -4,16 +4,32 @@ import os
 from pathlib import Path
 import yaml
 import xml.etree.ElementTree as ET
+from ament_index_python.packages import get_package_share_directory
 
 root = Path('/opt/go2_project')
 spec = importlib.util.spec_from_file_location('go2_prepare',root/'go2_3d/prepare.py')
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-sdk = Path(os.environ['GO2_TEST_SDK_SOURCE'])
+sdk = Path(os.environ.get('GO2_TEST_SDK_SOURCE') or get_package_share_directory('go2_robot_sdk'))
 before = {p:p.read_bytes() for p in sdk.rglob('*') if p.is_file()}
 module.get_package_share_directory = lambda package: str(sdk)
 module.main()
 params = yaml.safe_load(Path('/runtime/config/nav2_3d.yaml').read_text())
+from motion_profile import LINEAR_SPEED, YAW_SPEED, LINEAR_ACCELERATION, TRAJECTORY_TIME
+follow = params['controller_server']['ros__parameters']['FollowPath']
+smoother = params['velocity_smoother']['ros__parameters']
+assert follow['max_vel_x'] == follow['max_speed_xy'] == smoother['max_velocity'][0] == LINEAR_SPEED == 0.30
+assert follow['max_vel_theta'] == smoother['max_velocity'][2] == YAW_SPEED
+assert follow['min_vel_x'] == smoother['min_velocity'][0] == 0.0
+assert follow['min_vel_y'] == follow['max_vel_y'] == 0.0
+assert follow['vx_samples'] == 2 and follow['vy_samples'] == 1
+assert follow['trajectory_generator_name'] == 'dwb_plugins::StandardTrajectoryGenerator'
+assert follow['limit_vel_cmd_in_traj'] is False
+assert follow['sim_time'] == TRAJECTORY_TIME
+assert LINEAR_ACCELERATION * TRAJECTORY_TIME >= LINEAR_SPEED
+assert follow['acc_lim_x'] == smoother['max_accel'][0] == LINEAR_ACCELERATION
+assert follow['decel_lim_x'] == smoother['max_decel'][0] == -LINEAR_ACCELERATION
+assert follow['xy_goal_tolerance'] == params['controller_server']['ros__parameters']['general_goal_checker']['xy_goal_tolerance']
 assert 'amcl' not in params
 for name in ('local_costmap','global_costmap'):
     cfg = params[name][name]['ros__parameters']
@@ -47,4 +63,4 @@ assert params['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml'].e
 behavior = ET.parse(root/'go2_3d/navigate.xml')
 assert not list(behavior.iter('Spin')) and not list(behavior.iter('BackUp'))
 assert all(p.read_bytes() == content for p,content in before.items())
-print('PASS SDK configuration: no AMCL, correct costmap frames, protected source unchanged')
+print('PASS SDK configuration: matched 0.30m/s controller/smoother envelope, two forward samples reachable from rest, XY goal-window alignment, no AMCL, protected SDK source unchanged')

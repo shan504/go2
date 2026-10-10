@@ -12,6 +12,7 @@ from unitree_api.msg import Response
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profile_sensor_data
 from rcl_interfaces.msg import ParameterDescriptor
 from go2_edu_dds_bridge import Go2EduBridge
+from motion_profile import LINEAR_SPEED, YAW_SPEED
 import signal
 
 
@@ -30,6 +31,12 @@ class LocalizedBridge(Go2EduBridge):
             'localization_invalid_or_stale','odometry_or_cloud_stale','nonfinite'),0)
         self.last_raw_cmd = None
         super().__init__()
+        # Override only the 3D route's envelope. The standalone EDU patch keeps
+        # its original limit; neither route amplifies a small command.
+        self.declare_parameter('max_linear_speed',LINEAR_SPEED,ParameterDescriptor(read_only=True))
+        self.declare_parameter('max_yaw_speed',YAW_SPEED,ParameterDescriptor(read_only=True))
+        self.gate.max_linear = self.get_parameter('max_linear_speed').value
+        self.gate.max_yaw = self.get_parameter('max_yaw_speed').value
         self.declare_parameter('allow_motion',False,ParameterDescriptor(read_only=True))
         self.motion_allowed = self.get_parameter('allow_motion').value
         self.create_subscription(Bool, '/localization/valid', self.on_validity, 1)
@@ -38,6 +45,7 @@ class LocalizedBridge(Go2EduBridge):
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.motion_status = self.create_publisher(String, '/control/status', retained)
         self.create_timer(0.5, self.publish_motion_status)
+        self.get_logger().info(f'3D navigation limits: linear={self.gate.max_linear}m/s yaw={self.gate.max_yaw}rad/s')
 
     def on_validity(self, message):
         self.localization_valid = message.data
@@ -129,6 +137,7 @@ class LocalizedBridge(Go2EduBridge):
             reason = 'forwarding Move requests'
         command = list(self.gate.command) if self.gate.command is not None else None
         text = (f'gate={reason}; enable_control={self.gate.enabled}; '
+                f'max_linear_speed={self.gate.max_linear:.2f} max_yaw_speed={self.gate.max_yaw:.2f}; '
                 f'localization_age={localization_age:.2f}s odom_age={odom_age:.2f}s '
                 f'cloud_age={cloud_age:.2f}s cmd_age={command_age:.2f}s cmd={command}; '
                 f'Move_requests={self.move_requests} nonzero_Move_requests={self.nonzero_move_requests} '

@@ -50,9 +50,10 @@ class MotionCheck(Node):
             'min_y_velocity_threshold', 'min_theta_velocity_threshold',
             'FollowPath.max_vel_x', 'FollowPath.max_vel_y', 'FollowPath.max_vel_theta',
             'FollowPath.min_speed_xy', 'FollowPath.max_speed_xy',
+            'FollowPath.vx_samples', 'FollowPath.trajectory_generator_name',
             'progress_checker.required_movement_radius',
             'progress_checker.movement_time_allowance'],
-        'go2_edu_dds_bridge': ['enable_control', 'allow_motion'],
+        'go2_edu_dds_bridge': ['enable_control', 'allow_motion', 'max_linear_speed', 'max_yaw_speed'],
     }
 
     def __init__(self):

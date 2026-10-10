@@ -1,6 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-check}" in
+  restart-navigation)
+    [[ $# -le 2 ]] || { echo 'Usage: tools.sh restart-navigation [standard|dense]' >&2; exit 2; }
+    profile="${2:-dense}"
+    case "$profile" in standard|dense) ;; *) echo 'Profile must be standard or dense' >&2; exit 2 ;; esac
+    project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+    if [[ "$(sudo docker inspect --format '{{.State.Running}}' go2-3d 2>/dev/null || true)" != true ]]; then
+      echo 'Keep the current navigation container running to retain its valid map pose.' >&2
+      exit 1
+    fi
+    bash "$project_dir/go2_3d/tools.sh" disable
+    mkdir -p "$project_dir/runtime"
+    pose_file="$(mktemp "$project_dir/runtime/navigation-pose.XXXXXX.json")"
+    trap 'rm -f -- "$pose_file"' EXIT
+    sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && timeout 10 python3 /opt/go2_project/go2_3d/snapshot_pose.py' > "$pose_file"
+    # Only finite numeric fields cross from ROS into shell arguments; never
+    # source a generated script or evaluate topic text as shell code.
+    pose_values="$(python3 - "$pose_file" <<'PY'
+import json, math, sys, time
+pose = json.load(open(sys.argv[1]))
+assert 0 <= time.time()-pose['captured_at'] < 30, 'Pose capture is stale'
+values = [float(pose[key]) for key in ('x','y','yaw_degrees','z')]
+assert all(math.isfinite(value) for value in values), 'Nonfinite pose'
+print(' '.join(format(value, '.9g') for value in values))
+PY
+    )"
+    read -r -a pose_args <<< "$pose_values"
+    echo "Restarting navigation with retained map pose (x y yaw_degrees z): $pose_values; motion remains disabled. Keep the robot stationary."
+    bash "$project_dir/go2_3d/run.sh" navigation "$profile" "${pose_args[@]}"
+    ;;
   export-map)
     project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
     mkdir -p "$project_dir/runtime"
@@ -78,5 +107,5 @@ case "${1:-check}" in
   shell)
     sudo docker exec -it go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec bash --norc'
     ;;
-  *) echo 'Usage: tools.sh [export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|drivecheck-native|drivecheck-balanced|drivecheck-walk|save|enable|disable|shell]' >&2; exit 2 ;;
+  *) echo 'Usage: tools.sh [restart-navigation [standard|dense]|export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|drivecheck-native|drivecheck-balanced|drivecheck-walk|save|enable|disable|shell]' >&2; exit 2 ;;
 esac

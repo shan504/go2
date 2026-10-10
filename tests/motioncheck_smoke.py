@@ -136,6 +136,8 @@ class Bridge(Node):
         super().__init__('go2_edu_dds_bridge')
         self.declare_parameter('enable_control', True)
         self.declare_parameter('allow_motion', True)
+        self.declare_parameter('max_linear_speed', 0.30)
+        self.declare_parameter('max_yaw_speed', 0.30)
         self.requests = self.create_publisher(Request, '/api/sport/request', 10)
         self.record_enabled = False
         self.next_id = 10000

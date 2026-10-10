@@ -7,6 +7,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from denoise import settings
+from motion_profile import configure_navigation
 sys.path.insert(0, '/opt/go2_project/patches/dds')
 from prepare import prepare as legacy_prepare
 
@@ -30,6 +31,7 @@ def main():
             tree.getroot().remove(link)
     tree.write(output/'go2_edu.urdf', encoding='utf-8', xml_declaration=True)
     nav = yaml.safe_load((output/'nav2_edu.yaml').read_text())
+    configure_navigation(nav)
     nav.pop('amcl', None)
     for key in ('local_costmap','global_costmap'):
         params = nav[key][key]['ros__parameters']
