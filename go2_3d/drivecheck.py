@@ -19,6 +19,7 @@ class DriveRefused(RuntimeError):
 
 
 class ManualDrive(Node):
+    DESCRIPTION = 'MANUAL direct Sport diagnostic, not navigation: vx=0.15m/s, vy=0, yaw=0, 20Hz, 2s; automatic StopMove.'
     def __init__(self):
         super().__init__('go2_bounded_manual_drivecheck')
         self.guard = self.create_client(GetParameters,'/go2_edu_dds_bridge/get_parameters')
@@ -68,6 +69,20 @@ class ManualDrive(Node):
         self.sent[(request.header.identity.id, api_id)] = time.monotonic()
         self.requests.publish(request)
 
+    def prepare_drive(self, spin):
+        pass
+
+    def publish_move(self):
+        self.publish_request(1008,json.dumps({'x':0.15,'y':0.0,'z':0.0}))
+
+    def stop_drive(self, spin):
+        if self.moves and rclpy.ok():
+            self.publish_request(1003)
+            flush_end = time.monotonic()+0.2
+            while time.monotonic()<flush_end:
+                spin(0.02)
+            print(f'StopMove API1003 sent; Move requests={self.moves}.',flush=True)
+
     def run(self,executor=None):
         def spin(timeout):
             if executor is None:
@@ -98,11 +113,18 @@ class ManualDrive(Node):
             raise DriveRefused('Bridge parameter query timed out')
         self.validate_guard(future.result())
         print('Bridge readback: enable_control=False, allow_motion=True; navigation bridge disabled.',flush=True)
-        print('MANUAL direct Sport diagnostic, not navigation: vx=0.15m/s, vy=0, yaw=0, 20Hz, 2s; automatic StopMove.',flush=True)
-        started = time.monotonic()
-        guard_at,next_guard,next_move = started,started+0.5,started
-        pending,requested_at = None,None
         try:
+            self.prepare_drive(spin)
+            # Preparation may take time: read the bridge again before any Move.
+            future = self.query_guard()
+            wait(future)
+            if not future.done():
+                raise DriveRefused('Bridge parameter query timed out after preparation')
+            self.validate_guard(future.result())
+            print(self.DESCRIPTION,flush=True)
+            started = time.monotonic()
+            guard_at,next_guard,next_move = started,started+0.5,started
+            pending,requested_at = None,None
             deadline = started+2.0
             while time.monotonic()<deadline:
                 spin(0.01)
@@ -123,27 +145,22 @@ class ManualDrive(Node):
                 if self.requests.get_subscription_count()==0:
                     raise DriveRefused('Sport request subscriber disappeared')
                 if now>=next_move:
-                    self.publish_request(1008,json.dumps({'x':0.15,'y':0.0,'z':0.0}))
+                    self.publish_move()
                     self.moves += 1
                     next_move = now+0.05
         finally:
             # Refused preflight never stops an existing navigation session.
             # Once this diagnostic sent Move, every exit sends StopMove.
-            if self.moves and rclpy.ok():
-                self.publish_request(1003)
-                flush_end = time.monotonic()+0.2
-                while time.monotonic()<flush_end:
-                    spin(0.02)
-                print(f'StopMove API1003 sent; Move requests={self.moves}.',flush=True)
+            self.stop_drive(spin)
 
 
-def main():
+def main(drive_type=ManualDrive):
     def terminate(signum,frame):
         raise KeyboardInterrupt
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     signal.signal(signal.SIGINT,terminate)
     signal.signal(signal.SIGTERM,terminate)
-    node = ManualDrive()
+    node = drive_type()
     from rclpy.executors import SingleThreadedExecutor
     from robotcheck import RobotCheck
     native = RobotCheck()

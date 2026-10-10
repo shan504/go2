@@ -328,13 +328,15 @@ bash go2_3d/tools.sh drivecheck
 且 Sport 请求话题存在匹配订阅者；条件不满足不发 Move。执行期间重新检查参数，
 桥被启用或查询失效则停止。它不修改步态、站立状态、控制模式、服务、优先级或内置避障。
 输出保存到 `runtime/drive-debug.txt`，包含本次 Move/Stop 配对响应、底盘实际速度/位移、
-原始 mode/gait/error 和下面三项只读状态。这个手动测试独立于导航桥，途中使用 Ctrl+C 停止；
+原始 mode/gait/error 和下面的只读状态。这个手动测试独立于导航桥，途中使用 Ctrl+C 停止；
 Foxglove 的停止按钮停止的是导航桥，不能替代手动测试自己的限时停止。
 
 也可仅读取底盘，不发送 Move/Stop：`bash go2_3d/tools.sh robotcheck 20`。
 它查询 MotionSwitcher CheckMode（`motion_switcher` API1001）、RobotState ServiceList
 （`robot_state` API1003）和内置避障 SwitchGet（`obstacles_avoid` API1002），并观察
-`/sportmodestate` 与 `/lf/sportmodestate`。缺少回复或状态接口会如实报告，不推断禁用状态。
+`/sportmodestate` 与 `/lf/sportmodestate`；另按 MCF 社区示例读取 Sport GetState（API1034，
+仅查询 state/bodyHeight/speedLevel/gait/continuousGait/economicGait）。不支持该查询的固件
+会报告响应原文或缺少响应。缺少回复或状态接口会如实报告，不推断禁用状态。
 原始 mode/gait 数字按实际 Go2W 固件保留。输出保存到 `runtime/robot-debug.txt`。
 
 Foxglove “停止运动＋取消导航”只取消本程序的目标并禁用本桥；它不会夺取官方遥控器的控制权。
@@ -342,6 +344,39 @@ Foxglove “停止运动＋取消导航”只取消本程序的目标并禁用�
 隔离 Humble ROS 端点测试覆盖请求字段、响应归属、两秒限时、SIGINT/SIGTERM Stop、
 参数拒绝/服务缺失不发送、执行中重新启用后 Stop，以及只读查询不会发送运动请求。
 这些检查验证工具行为，没有连接实物或证明当前机器人已能自动导航。
+
+### 内置避障开启时测试专用运动接口
+
+实机两秒直接 Sport 测试的 38 次 Move 和一次 Stop 均收到 code0，但只有探身，
+原生状态 XY 位移约 5cm，查询返回 `name=mcf`、`form='0'`、内置避障 `enable=True`。
+这进一步将问题缩小到原生控制执行，仍不能只据旧版 mode/gait 或 `error_code=100` 判断具体故障。
+MCF 与旧版模式枚举的适用性需要看实际固件和 GetState 返回。
+
+[宇树官方内置避障示例](https://github.com/unitreerobotics/unitree_sdk2_python/blob/814556d15970dd2ecf1c9984e845ca02ab07e206/example/obstacles_avoid/obstacles_avoid_move.py)
+使用一条不同的速度路径：`/api/obstacles_avoid/request` 的 API1004
+`{"is_remote_commands_from_api":true}` 选择 API 输入，再用 API1003
+`{"x":0.15,"y":0.0,"yaw":0.0,"mode":0}` 控制速度。
+它的第三个速度字段是 `yaw`，与 Sport API1008 的 `z` 不同。
+内置避障开启是实际观察，尚未证明它就是直接 Sport 不前进的唯一原因。
+
+保持导航运行并禁用本桥，在空地、遥控器摇杆回中时执行：
+
+```bash
+cd ~/go2_nav
+git pull --ff-only
+bash go2_3d/tools.sh disable
+bash go2_3d/tools.sh drivecheck-native
+```
+
+此测试仅在内置避障已开启、导航桥已禁用且 API 输入切换获得 code0 后发速度。
+沿用 `0.15m/s`、20Hz、两秒，**不调用 SwitchSet，不开关内置避障，不切换 MCF/步态/站立模式**。
+结束、Ctrl+C、速度请求被拒或导航桥重新启用时，发送原生零速度、Sport Stop，
+并用 API1004 false 释放 API 速度输入；即使 true 的回复丢失，也尝试释放。
+释放成功以对应 code0 为准，缺少回复会明确报告失败。释放 API 输入是官方示例的收尾步骤，
+不是将内置避障关闭，也不是读取并恢复一个未知的原始输入选择状态。
+手动测试期间用 Ctrl+C 中断，不以 Foxglove 导航桥停止按钮替代。
+输出保存到 `runtime/native-drive-debug.txt`。能否实际前进仍需现场确认；
+当前 Nav2 桥继续使用原 Sport 后端，不因诊断自动改用避障后端。
 
 ## 清理现有静态地图
 

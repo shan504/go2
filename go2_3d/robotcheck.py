@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read native state and three official read-only RPCs; never change robot mode."""
+"""Read native state and read-only RPCs; never change robot mode."""
 import argparse
 from collections import Counter
 import json
@@ -16,7 +16,10 @@ from unitree_api.msg import Request, Response
 class RobotCheck(Node):
     # Service AND API form the allowlist: 1003 on sport would mean StopMove,
     # whereas 1003 on robot_state is the read-only ServiceList query.
-    QUERIES = {'motion_switcher': 1001, 'robot_state': 1003, 'obstacles_avoid': 1002}
+    QUERIES = {'motion_switcher': 1001, 'robot_state': 1003, 'obstacles_avoid': 1002,
+               'sport': 1034}
+    PARAMETERS = {'sport': ['state', 'bodyHeight', 'speedLevel', 'gait',
+                            'continuousGait', 'economicGait']}
     STATE_TOPICS = ('/sportmodestate', '/lf/sportmodestate')
 
     def __init__(self):
@@ -76,7 +79,7 @@ class RobotCheck(Node):
             request.header.identity.id = time.time_ns()
             request.header.identity.api_id = api
             request.header.policy.noreply = False
-            request.parameter = '{}'
+            request.parameter = json.dumps(self.PARAMETERS.get(service, {}))
             self.sent[service] = (request.header.identity.id, api, time.monotonic())
             self.query_publishers[service].publish(request)
 
@@ -131,7 +134,7 @@ def main():
     rclpy.init()
     node = RobotCheck()
     try:
-        print(f'READ-ONLY native robot check: recording {args.seconds}s; three status queries only.', flush=True)
+        print(f'READ-ONLY native robot check: recording {args.seconds}s; status queries only.', flush=True)
         deadline = time.monotonic()+args.seconds
         while time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.1)

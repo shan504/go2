@@ -64,7 +64,12 @@ def invoke(interrupt=None):
             raise AssertionError('No Move observed before interruption')
     output,_ = process.communicate(timeout=8)
     time.sleep(0.05)
-    return process.returncode,bridge.requests[before:],output
+    observed = bridge.requests[before:]
+    assert all(message.header.identity.api_id in (1003, 1008, 1034) for message in observed)
+    # A read-only GetState may arrive during Stop flushing; check the last
+    # control command, rather than treating a subsequent query as motion.
+    controls = [message for message in observed if message.header.identity.api_id != 1034]
+    return process.returncode,controls,output
 
 
 try:

@@ -153,7 +153,8 @@ Go2W 不因此需要改成另一个轮速话题。RPC code0 不等于运动证�
 未据此改变 lease、优先级、站立、运动模式或避障开关。
 
 `robotcheck.py` 只允许以下服务/API 组合：`motion_switcher/1001` CheckMode、
-`robot_state/1003` ServiceList、`obstacles_avoid/1002` SwitchGet。API 必须与服务一起核对：
+`robot_state/1003` ServiceList、`obstacles_avoid/1002` SwitchGet，以及后续新增的 MCF `sport/1034` GetState。
+API 必须与服务一起核对：
 1003 在 sport 上是 StopMove，在 robot_state 上才是只读查询。回复必须同时匹配请求 ID 和 API。
 动态订阅原生 SportModeState，保留 Go2W 原始枚举、实测速度及位移；缺少接口不假定为零速度。
 
@@ -162,3 +163,29 @@ Go2W 不因此需要改成另一个轮速话题。RPC code0 不等于运动证�
 读取底盘状态与上述只读 RPC，隔离 Nav2 与底盘执行。它不自动切换任何底盘模式。
 Humble/FastDDS 隔离 ROS 模拟验证请求、响应关联、拒绝与停止路径；未连接实物，
 没有验证轮子真实响应或使用机器人上的 CycloneDDS 执行此测试。
+
+## MCF 与开启的原生避障接口
+
+后续实机直接 Sport 两秒测试：38 次 Move1008 和一次 Stop1003 全部响应 code0，
+现场仅身体探前、没有前进；两种频率原生状态都只有约 5cm 位移。
+MotionSwitcher 回复 `{'form':'0','name':'mcf'}`；原生避障 SwitchGet 回复 enable=True。
+不把 `error_code=100` 解码为特定电机故障，不把旧版 mode0/gait0 作为 MCF 的完整状态解释。
+
+官方 SDK `814556d1` 的
+[ObstaclesAvoidClient](https://github.com/unitreerobotics/unitree_sdk2_python/blob/814556d15970dd2ecf1c9984e845ca02ab07e206/unitree_sdk2py/go2/obstacles_avoid/obstacles_avoid_client.py)
+及[示例](https://github.com/unitreerobotics/unitree_sdk2_python/blob/814556d15970dd2ecf1c9984e845ca02ab07e206/example/obstacles_avoid/obstacles_avoid_move.py)
+先 UseRemoteCommandFromApi(True)（API1004），再发 Move（API1003，x/y/yaw/mode=0），
+发送零速度后 UseRemoteCommandFromApi(False)。这说明存在独立的接口契约，
+不能仅凭避障开启就断言普通 Sport 必然失效；通过限时对比测试确认实际固件行为。
+
+补充参考社区
+[MCF 示例](https://github.com/legion1581/go2_webrtc_connect/blob/e0abc5780761539eff89a382a79319e5cf6ad1f4/examples/go2/data_channel/sportmode_mcf/sportmode_mcf.py)
+固定提交 `e0abc578`：MCF 沿用 Sport Move1008，提供 GetState1034（参数为状态键数组）。
+`robotcheck` 只增加该只读查询，不采用社区脚本中的模式或姿态切换。
+该 GetState 查询不在当前官方 SDK SportClient 中，因此不称为官方定义，也不据其缺少回复认定故障。
+
+新增显式 `drivecheck-native`，使用已开启的内置避障路径两秒，不调用开关避障的 SwitchSet。
+所有正常、SIGINT/SIGTERM 和失败收尾发送原生零速度、Sport Stop，并释放 API 输入。
+输入切换回复丢失也清理；速度拒绝和桥再次启用提前停止。保持原导航桥配置，
+等待实际前进验证再决定是否把该后端用于 Nav2。隔离 ROS 模拟验证协议和失败收尾，
+没有验证真实底盘运动。

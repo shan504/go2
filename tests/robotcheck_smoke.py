@@ -17,7 +17,7 @@ import robotcheck
 from robotcheck import RobotCheck
 
 
-ALLOWED = {'motion_switcher': 1001, 'robot_state': 1003, 'obstacles_avoid': 1002}
+ALLOWED = {'motion_switcher': 1001, 'robot_state': 1003, 'obstacles_avoid': 1002, 'sport': 1034}
 
 
 class Harness:
@@ -99,12 +99,12 @@ def passive_without_servers():
         monitor.send_queries()
         assert monitor.sent == {}, 'Query sent without a matched server'
         summary = monitor.summary()
-        assert summary.count('NO MATCHED REQUEST SUBSCRIBER; query not sent') == 3
+        assert summary.count('NO MATCHED REQUEST SUBSCRIBER; query not sent') == 4
         assert '/sportmodestate: NO MESSAGES' in summary
         assert '/lf/sportmodestate: NO MESSAGES' in summary
         published = {endpoint.topic_name for endpoint in monitor.query_publishers.values()}
         assert published == {f'/api/{service}/request' for service in ALLOWED}
-        assert '/api/sport/request' not in published
+        assert monitor.QUERIES['sport'] == 1034, 'Sport must only query GetState'
         print('PASS native inspection: missing servers remain inconclusive and send no request')
     finally:
         harness.close()
@@ -121,12 +121,13 @@ def states_and_readonly_queries():
         for service, api in ALLOWED.items():
             request = endpoints.requests[service][0]
             assert request.header.identity.api_id == api
-            assert request.parameter == '{}' and json.loads(request.parameter) == {}
+            expected = monitor.PARAMETERS.get(service, {})
+            assert json.loads(request.parameter) == expected
             assert request.header.policy.noreply is False
             assert request.header.lease.id == 0
             assert request.header.identity.id > 0
             ids.add(request.header.identity.id)
-        assert len(ids) == 3, 'Queries need separate response identities'
+        assert len(ids) == 4, 'Queries need separate response identities'
 
         # Existing traffic and mismatched API responses are not replies to us.
         endpoints.reply('motion_switcher', 0, '{"name":"unrelated"}', identity_offset=1)
@@ -137,13 +138,15 @@ def states_and_readonly_queries():
         endpoints.reply('motion_switcher', 0, '{"name":"normal","form":0}')
         endpoints.reply('robot_state', 0, '[{"name":"sport_mode","status":1,"protect":true}]')
         endpoints.reply('obstacles_avoid', 9876, 'firmware-specific status')
-        harness.wait(lambda: len(monitor.replies) == 3)
+        endpoints.reply('sport', 0, '{"state":0,"speedLevel":1}')
+        harness.wait(lambda: len(monitor.replies) == 4)
         assert monitor.replies['motion_switcher'][1:] == (0, '{"name":"normal","form":0}')
         assert monitor.replies['obstacles_avoid'][1:] == (9876, 'firmware-specific status')
         summary = monitor.summary()
         assert "motion_switcher query api=1001: code=0 data={'name': 'normal', 'form': 0}" in summary
         assert 'robot_state query api=1003: code=0' in summary
         assert "obstacles_avoid query api=1002: code=9876 data='firmware-specific status'" in summary
+        assert "sport query api=1034: code=0 data={'state': 0, 'speedLevel': 1}" in summary
         assert "'mode': 3, 'gait_type': 1, 'error_code': 0" in summary
         assert "'mode': 254, 'gait_type': 253, 'error_code': 17" in summary
         assert "'position': [1.0, 2.0" in summary
@@ -161,7 +164,8 @@ def states_and_readonly_queries():
             monitor.send_queries()
         harness.spin(0.55)
         assert all(len(requests) == 1 for requests in endpoints.requests.values()), 'Query was retried'
-        assert endpoints.sport_requests == [], 'Inspection must not send Move, Stop, or sport control requests'
+        assert len(endpoints.sport_requests) == 1 and endpoints.sport_requests[0].header.identity.api_id == 1034, \
+            'Inspection must only send GetState, never Move, Stop, or sport control requests'
         print('PASS native inspection: real state schemas, raw firmware values, query allowlist, ID/API correlation and no control writes')
     finally:
         harness.close()

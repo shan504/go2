@@ -34,9 +34,9 @@ case "${1:-check}" in
     mkdir -p "$project_dir/runtime"
     sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && timeout 150 python3 -u /opt/go2_project/go2_3d/motioncheck.py "$1"' bash "${2:-30}" | tee "$project_dir/runtime/velocity-debug.txt"
     ;;
-  robotcheck|drivecheck)
-    [[ $# -le 2 ]] || { echo 'Usage: tools.sh robotcheck [SECONDS: 8..60] | drivecheck' >&2; exit 2; }
-    if [[ "$1" == drivecheck && $# != 1 ]]; then
+  robotcheck|drivecheck|drivecheck-native)
+    [[ $# -le 2 ]] || { echo 'Usage: tools.sh robotcheck [SECONDS: 8..60] | drivecheck | drivecheck-native' >&2; exit 2; }
+    if [[ "$1" != robotcheck && $# != 1 ]]; then
       echo 'drivecheck has a fixed speed of 0.15m/s and a fixed duration of 2s; no arguments.' >&2
       exit 2
     fi
@@ -48,8 +48,10 @@ case "${1:-check}" in
     mkdir -p "$project_dir/runtime"
     if [[ "$1" == robotcheck ]]; then
       sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && timeout 70 python3 -u /opt/go2_project/go2_3d/robotcheck.py "$1"' bash "${2:-20}" | tee "$project_dir/runtime/robot-debug.txt"
-    else
+    elif [[ "$1" == drivecheck ]]; then
       sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && timeout 20 python3 -u /opt/go2_project/go2_3d/drivecheck.py' | tee "$project_dir/runtime/drive-debug.txt"
+    else
+      sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && timeout 20 python3 -u /opt/go2_project/go2_3d/native_drivecheck.py' | tee "$project_dir/runtime/native-drive-debug.txt"
     fi
     ;;
   inflation-5cm)
@@ -72,5 +74,5 @@ case "${1:-check}" in
   shell)
     sudo docker exec -it go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec bash --norc'
     ;;
-  *) echo 'Usage: tools.sh [export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|save|enable|disable|shell]' >&2; exit 2 ;;
+  *) echo 'Usage: tools.sh [export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|drivecheck-native|save|enable|disable|shell]' >&2; exit 2 ;;
 esac
