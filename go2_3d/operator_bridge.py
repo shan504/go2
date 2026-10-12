@@ -11,7 +11,7 @@ from rcl_interfaces.srv import SetParameters, GetParameters
 from rclpy.action import ActionClient
 from std_msgs.msg import Bool, Empty, String
 from std_srvs.srv import Trigger
-from geometry_msgs.msg import PoseStamped, PointStamped
+from geometry_msgs.msg import PoseStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import OccupancyGrid
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -38,8 +38,6 @@ class Operator(Node):
         self.route_paused = False
         self.waypoint_number = 0
         self.completed_waypoints = 0
-        self.goal_inputs_received = 0
-        self.last_goal_input_topic = '-'
         self.goal_generation = 0
         self.motion_generation = 0
         self.enable_query = None
@@ -71,7 +69,6 @@ class Operator(Node):
         self.create_subscription(Empty,'/navigation/cancel',self.on_cancel,1)
         self.create_subscription(Empty,'/navigation/resume',self.on_resume,1)
         self.create_subscription(PoseStamped,'/goal_pose',self.on_goal,100)
-        self.create_subscription(PointStamped,'/navigation/waypoint',self.on_point_goal,100)
         self.create_timer(0.1,self.watchdog)
         self.report(f'Operator ready: mode={self.mode}; goals require live localization and free costmap cells')
 
@@ -79,7 +76,6 @@ class Operator(Node):
         if self.mode == 'navigation':
             current = self.inflight_waypoint[0] if self.inflight_waypoint else '-'
             text += f'; route current={current} queued={len(self.waypoints)} completed={self.completed_waypoints} paused={self.route_paused}'
-            text += f'; goal_inputs_received={self.goal_inputs_received} last_input={self.last_goal_input_topic}'
             self.publish_waypoints()
         self.status.publish(String(data=text))
         self.get_logger().info(text)
@@ -226,20 +222,6 @@ class Operator(Node):
         self.check_motion_state()
 
     def on_goal(self,message):
-        self.accept_waypoint(message,'/goal_pose')
-
-    def on_point_goal(self,message):
-        # Position-only patrol arrival does not require the browser's second
-        # heading click. Both input types share the same validation and queue.
-        pose = PoseStamped()
-        pose.header = copy.deepcopy(message.header)
-        pose.pose.position = copy.deepcopy(message.point)
-        pose.pose.orientation.w = 1.0
-        self.accept_waypoint(pose,'/navigation/waypoint')
-
-    def accept_waypoint(self,message,input_topic):
-        self.goal_inputs_received += 1
-        self.last_goal_input_topic = input_topic
         if self.action is None or not self.localized():
             self.report('Goal rejected: navigation mode and live GICP localization required')
             return

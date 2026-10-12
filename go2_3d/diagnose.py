@@ -8,7 +8,6 @@ from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profile_sensor_data
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, CompressedImage
-from geometry_msgs.msg import PoseStamped, PointStamped, PoseWithCovarianceStamped
 from std_msgs.msg import String, Bool
 from tf2_ros import Buffer, TransformListener, TransformException
 from geometry import cloud_xyz
@@ -32,8 +31,6 @@ class Diagnostics(Node):
             '/point_cloud2':PointCloud2,'/registered_cloud':PointCloud2,'/odom':Odometry,'/map_cloud':PointCloud2,
             '/camera/image/compressed':CompressedImage,
             '/localization/status':String,'/localization/valid':Bool,
-            '/operator/status':String,'/control/status':String,'/navigation/startup_status':String,
-            '/navigation/waypoint':PointStamped,'/goal_pose':PoseStamped,'/initialpose':PoseWithCovarianceStamped,
         }
         for topic,kind in self.types.items():
             def receive(message,topic=topic):
@@ -41,8 +38,7 @@ class Diagnostics(Node):
                 self.counts[topic] = self.counts.get(topic,0)+1
                 self.received[topic] = time.monotonic()
             self.create_subscription(kind,topic,receive,
-                                     self.retained if topic in ('/map_cloud','/operator/status','/control/status',
-                                         '/navigation/startup_status') else qos_profile_sensor_data)
+                                     self.retained if topic == '/map_cloud' else qos_profile_sensor_data)
         self.create_timer(0.05,self.sample_tf)
 
     def sample_tf(self):
@@ -61,7 +57,6 @@ class Diagnostics(Node):
 
     def summary(self):
         lines = ['READ-ONLY 3D diagnostics (raw timestamps are not host timestamps)',
-                 'Goal input counts cover this observation window only; this tool sends no goals or motion commands.',
                  'Nodes: '+', '.join(sorted(self.get_node_names()))]
         now = self.get_clock().now().nanoseconds
         for topic,kind in self.types.items():
@@ -79,10 +74,6 @@ class Diagnostics(Node):
                 prefix += f' host_age={now/1e9-stamp:.3f}s'
             if kind is Odometry:
                 prefix += f' child={message.child_frame_id!r}'
-            if kind in (PointStamped,PoseStamped,PoseWithCovarianceStamped):
-                p = message.point if kind is PointStamped else message.pose.position if kind is PoseStamped else message.pose.pose.position
-                prefix += f' xyz={[round(p.x,3),round(p.y,3),round(p.z,3)]}'
-                prefix += f' subscribers={self.count_subscribers(topic)}'
             if kind is PointCloud2:
                 prefix += f' points={message.width*message.height} fields={[f.name for f in message.fields]}'
                 try:

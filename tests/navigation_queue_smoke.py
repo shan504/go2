@@ -1,7 +1,5 @@
 """Actual ROS action/service queue protocol; no planner, DDS or robot motion."""
 import copy
-import json
-from pathlib import Path
 import threading
 import time
 import rclpy
@@ -12,7 +10,6 @@ from rclpy.parameter import Parameter
 from nav2_msgs.action import NavigateToPose
 from std_msgs.msg import Bool, Empty
 from visualization_msgs.msg import MarkerArray, Marker
-from geometry_msgs.msg import PointStamped
 from navigation_gateway_smoke import Operator, TestEndpoints, wait_for, PoseStamped, grid_cell
 
 
@@ -31,10 +28,6 @@ class QueueEndpoints(TestEndpoints):
             cancel_callback=lambda request: CancelResponse.ACCEPT,
             callback_group=ReentrantCallbackGroup())
         self.resume = self.create_publisher(Empty,'/navigation/resume',1)
-        preset = json.loads((Path(__file__).resolve().parents[1]/'docs/foxglove_go2_navigation.json').read_text())
-        settings = preset['configById']['3D!g2goal']['publish']
-        assert settings['type']=='point','Default layout requires a single-click Point publication'
-        self.point_goal = self.create_publisher(PointStamped,settings['pointTopic'],100)
         self.markers = None
         self.create_subscription(MarkerArray,'/navigation/waypoints',
             lambda m: setattr(self,'markers',m),self.startup.qos_profile)
@@ -84,14 +77,7 @@ def main():
     pose = PoseStamped()
     pose.header.frame_id = 'map'
     pose.pose.orientation.w = 1.0
-    def click(x,point=False):
-        if point:
-            goal = PointStamped()
-            goal.header.frame_id = 'map'
-            goal.header.stamp.sec = 1
-            goal.point.x = x
-            endpoints.point_goal.publish(goal)
-            return
+    def click(x):
         goal = copy.deepcopy(pose)
         goal.pose.position.x = x
         endpoints.goal.publish(goal)
@@ -100,24 +86,11 @@ def main():
         wait_for(lambda: operator.localized() and len(operator.grids)==3 and operator.action.server_is_ready()
                  and operator.motion_state.service_is_ready())
         wait_for(lambda: operator.buffer.can_transform('map','base_footprint',rclpy.time.Time()))
-        invalid = PointStamped()
-        invalid.header.frame_id = 'base_link'
-        invalid.point.x = 0.4
-        endpoints.point_goal.publish(invalid)
-        wait_for(lambda: operator.goal_inputs_received==1)
-        assert not operator.waypoints and endpoints.goals==0
-        invalid.header.frame_id = 'map'
-        invalid.point.x = float('nan')
-        endpoints.point_goal.publish(invalid)
-        wait_for(lambda: operator.goal_inputs_received==2)
-        assert not operator.waypoints and endpoints.goals==0
         for number,x in enumerate((0.4,0.8,1.2),1):
-            click(x,point=number!=2)
+            click(x)
             wait_for(lambda: len(operator.waypoints)==number)
         time.sleep(0.3)
         assert endpoints.goals == 0,'Disabled route started Nav2'
-        assert operator.goal_inputs_received==5
-        assert operator.last_goal_input_topic=='/navigation/waypoint'
         wait_for(lambda: endpoints.markers is not None and len(endpoints.markers.markers)==7)
         assert [m.text for m in endpoints.markers.markers if m.type==Marker.TEXT_VIEW_FACING] == ['1','2','3']
         endpoints.enable.publish(Bool(data=True))
@@ -149,7 +122,7 @@ def main():
         wait_for(lambda: operator.completed_waypoints==4 and operator.goal_handle is None)
         assert endpoints.positions==[0.4,0.8,1.2,1.2,1.6],endpoints.positions
         assert not operator.waypoints and endpoints.max_active==1
-        print('PASS single-click Point and legacy Pose share ordered queue/validation, append during execution, real enable readback, failure pause and explicit retry')
+        print('PASS ordered queue, append during execution, real enable readback, failure pause and explicit retry')
 
         click(0.4)
         wait_for(lambda: endpoints.goals==6 and operator.goal_handle is not None)

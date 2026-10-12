@@ -89,9 +89,6 @@
         },
         "/point_cloud2": {
           "visible": false
-        },
-        "/navigation/waypoint": {
-          "visible": true
         }
       },
       "layers": {},
@@ -198,17 +195,14 @@
         },
         "/navigation/waypoints": {
           "visible": true
-        },
-        "/navigation/waypoint": {
-          "visible": true
         }
       },
       "layers": {},
       "imageMode": {},
       "publish": {
-        "type": "point",
+        "type": "pose",
         "poseTopic": "/goal_pose",
-        "pointTopic": "/navigation/waypoint",
+        "pointTopic": "/clicked_point",
         "poseEstimateTopic": "/initialpose",
         "poseEstimateXDeviation": 0.5,
         "poseEstimateYDeviation": 0.5,

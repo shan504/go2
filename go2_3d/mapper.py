@@ -59,11 +59,6 @@ class Mapper(Node):
         self.generation = 0
         self.latest = None
         self.history = deque(maxlen=32)
-        self.pending_clouds = deque(maxlen=32)
-        self.last_received_cloud_stamp = None
-        self.cloud_status = 'waiting for first cloud'
-        self.cloud_counts = dict.fromkeys(('received', 'aligned', 'tf_waits', 'expired',
-                                           'invalid_tf', 'age_rejected', 'duplicate', 'queue_dropped'), 0)
         self.first_received = None
         self.processed_stamp = None
         self.correction = np.eye(4)
@@ -104,9 +99,6 @@ class Mapper(Node):
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.initial_pose, 1)
         self.create_service(Trigger, '/save_3d_map', self.save_map)
         self.create_timer(0.1, self.health)
-        # Cloud and TF use separate DDS deliveries. Keep fresh packets until
-        # their exact odometry timestamp arrives, without blocking callbacks.
-        self.create_timer(0.05, self.process_pending_clouds)
         # Nav2 needs transforms between GICP results, not only at the older
         # scan stamp after a registration finishes. Hold only a fresh accepted
         # map correction, timestamped by actual odometry (never future-dated).
@@ -119,79 +111,27 @@ class Mapper(Node):
         self.status_pub.publish(String(data=text))
         self.get_logger().info(text)
 
-    def cloud_diagnostics(self):
-        with self.lock:
-            return ('clouds_'+ ' '.join(f'{name}={count}' for name, count in self.cloud_counts.items())+
-                    f' pending={len(self.pending_clouds)}')
-
     def receive_cloud(self, message):
-        received = time.monotonic()
-        self.cloud_counts['received'] += 1
         if message.header.frame_id != 'base_link':
             self.get_logger().error('Expected cloud already transformed to base_link', throttle_duration_sec=5)
             return
-        stamp = Time.from_msg(message.header.stamp)
-        age = (self.get_clock().now()-stamp).nanoseconds/1e9
+        age = (self.get_clock().now()-Time.from_msg(message.header.stamp)).nanoseconds/1e9
         if not -0.1 <= age <= 1.0:
-            self.cloud_counts['age_rejected'] += 1
-            self.cloud_status = f'Dropped cloud: timestamp age={age:.3f}s outside [-0.1, 1.0]s'
-            self.get_logger().warning(self.cloud_status, throttle_duration_sec=5)
+            return
+        try:
+            odom = self.buffer.lookup_transform('odom','base_link',Time.from_msg(message.header.stamp))
+            matrix = transform_matrix(odom.transform)
+        except (TransformException, ValueError):
+            self.get_logger().warning('Waiting for odom -> base_link at cloud timestamp', throttle_duration_sec=5)
             return
         with self.lock:
-            if (self.last_received_cloud_stamp is not None and
-                    stamp.nanoseconds <= self.last_received_cloud_stamp):
-                self.cloud_counts['duplicate'] += 1
-                self.get_logger().debug('Dropped duplicate or reordered cloud', throttle_duration_sec=5)
+            if self.latest is not None and Time.from_msg(message.header.stamp) <= Time.from_msg(self.latest[0].header.stamp):
                 return
-            self.last_received_cloud_stamp = stamp.nanoseconds
-            if len(self.pending_clouds) == self.pending_clouds.maxlen:
-                self.cloud_counts['queue_dropped'] += 1
-                self.cloud_status = 'Dropped oldest cloud: pending odometry TF queue full'
-                self.get_logger().warning(self.cloud_status, throttle_duration_sec=5)
-            self.pending_clouds.append((message, received))
-        self.process_pending_clouds()
-
-    def process_pending_clouds(self):
-        with self.lock:
-            # Try each packet once per callback. A missing older transform
-            # must not prevent a newer, transformable packet from progressing.
-            for _ in range(len(self.pending_clouds)):
-                message, received = self.pending_clouds.popleft()
-                stamp = Time.from_msg(message.header.stamp)
-                age = (self.get_clock().now()-stamp).nanoseconds/1e9
-                receipt_age = time.monotonic()-received
-                if not -0.1 <= age <= 1.0 or not 0 <= receipt_age <= 1.0:
-                    self.cloud_counts['expired'] += 1
-                    self.cloud_status = (f'Dropped cloud waiting for odometry TF: '
-                                         f'timestamp_age={age:.3f}s receipt_age={receipt_age:.3f}s')
-                    self.get_logger().warning(self.cloud_status, throttle_duration_sec=5)
-                    continue
-                if (self.latest is not None and
-                        stamp <= Time.from_msg(self.latest[0].header.stamp)):
-                    continue
-                try:
-                    odom = self.buffer.lookup_transform('odom','base_link',stamp)
-                except TransformException as error:
-                    self.cloud_counts['tf_waits'] += 1
-                    self.pending_clouds.append((message, received))
-                    self.cloud_status = (f'Waiting for odom -> base_link at cloud timestamp '
-                                         f'{stamp.nanoseconds/1e9:.9f}; retrying fresh packet: {error}')
-                    self.get_logger().warning(self.cloud_status, throttle_duration_sec=5)
-                    continue
-                try:
-                    matrix = transform_matrix(odom.transform)
-                except ValueError as error:
-                    self.cloud_counts['invalid_tf'] += 1
-                    self.cloud_status = f'Dropped cloud: invalid odom -> base_link transform: {error}'
-                    self.get_logger().error(self.cloud_status, throttle_duration_sec=5)
-                    continue
-                self.latest = (message, matrix, received)
-                if self.first_received is None:
-                    self.first_received = received
-                self.history.append(self.latest)
-                self.cloud_counts['aligned'] += 1
-                self.cloud_status = 'cloud aligned with timestamped odometry'
-        if (self.latest is not None and self.p['mode'] == 'localization' and self.p['auto_initialize'] and
+            self.latest = (message, matrix, time.monotonic())
+            if self.first_received is None:
+                self.first_received = self.latest[2]
+            self.history.append(self.latest)
+        if (self.p['mode'] == 'localization' and self.p['auto_initialize'] and
                 not self.initial_hint_used):
             self.initial_hint_used = True
             hint = PoseWithCovarianceStamped()
@@ -337,28 +277,28 @@ class Mapper(Node):
                 self.accepted_odom = odom_base.copy()
                 header = Header(stamp=message.header.stamp,frame_id='map')
                 self.registered_pub.publish(xyz_message(header,new))
-            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}; {self.cloud_diagnostics()}'))
+            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}'))
         except Exception as error:
             with self.lock:
                 if generation == self.generation:
                     self.last_accepted = None
                     self.last_failure = str(error)
             self.get_logger().warning(str(error), throttle_duration_sec=2.0)
-            self.status_pub.publish(String(data=f'{error}; {self.cloud_diagnostics()}'))
+            self.status_pub.publish(String(data=str(error)))
 
     def health(self):
         with self.lock:
             valid = (self.p['mode'] == 'localization' and self.last_accepted is not None and
                      time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
             if self.p['mode']=='localization' and not self.initialized and time.monotonic()-self.waiting_status_time>2:
-                text = (f'Waiting for fresh cloud and timestamped odometry; {self.cloud_status}' if self.latest is None else
+                text = ('Waiting for fresh cloud and timestamped odometry' if self.latest is None else
                         'Waiting for actual initial map pose; Nav2 startup deferred')
-                self.status_pub.publish(String(data=f'{text}; {self.cloud_diagnostics()}'))
+                self.status_pub.publish(String(data=text))
                 self.waiting_status_time = time.monotonic()
             elif self.p['mode']=='localization' and not valid and time.monotonic()-self.waiting_status_time>2:
                 cloud_age = time.monotonic()-self.latest[2] if self.latest else float('inf')
                 accepted_age = time.monotonic()-self.last_accepted if self.last_accepted else float('inf')
-                self.status_pub.publish(String(data=f'Localization invalid: {self.last_failure or "waiting for a fresh accepted GICP match"}; cloud_age={cloud_age:.2f}s accepted_age={accepted_age:.2f}s; {self.cloud_status}; {self.cloud_diagnostics()}'))
+                self.status_pub.publish(String(data=f'Localization invalid: {self.last_failure or "waiting for a fresh accepted GICP match"}; cloud_age={cloud_age:.2f}s accepted_age={accepted_age:.2f}s'))
                 self.waiting_status_time = time.monotonic()
         self.valid_pub.publish(Bool(data=valid))
 
