@@ -264,7 +264,13 @@ class Mapper(Node):
             registration_count = len(source.points)
             if len(source.points) < 100:
                 raise ValueError('Too few finite/range-filtered cloud points')
-            guess = correction @ odom_base
+            # Predict from the last accepted measurement, not the lagging
+            # output filter. At a waypoint stop a sparse/repeating scan can
+            # otherwise chase filter residual into a different ICP basin.
+            # Keep the filtered correction for TF/output only; bootstrap and
+            # mapping still use their original initialization/prediction.
+            prediction = previous_match if self.p['mode'] == 'localization' and seeded else correction
+            guess = prediction @ odom_base
             if not len(points) and self.p['mode'] == 'mapping':
                 # Zero first position/heading, but preserve the odometry Z
                 # direction. Identity here had baked initial body roll/pitch

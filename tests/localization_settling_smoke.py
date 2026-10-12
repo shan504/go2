@@ -15,7 +15,13 @@ from test_3d import room
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
-        points = room()
+        # Repeating floor samples make horizontal translation weakly
+        # observable in a sparse floor-only scan, while the full room can
+        # establish a reliable correction before a waypoint transition.
+        x,y = np.meshgrid(np.arange(-3.,4.01,0.1),np.arange(-2.,3.01,0.1))
+        floor = np.column_stack((x.ravel(),y.ravel(),np.full(x.size,-0.3)))
+        structure = room()
+        points = np.vstack((structure[structure[:,2]>-0.299],floor))
         o3d.io.write_point_cloud(str(directory/'map.pcd'),
             o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points)),compressed=True)
         (directory/'metadata.yaml').write_text(yaml.safe_dump(
@@ -23,6 +29,7 @@ def main():
         rclpy.init(args=['--ros-args','-p','mode:=localization','-p',f'map_directory:={tmp}',
                         '-p','auto_initialize:=true'])
         mapper,sensors = Mapper(),Sensors()
+        sensors.points = points
         executor = MultiThreadedExecutor(num_threads=4)
         for node in (mapper,sensors):
             executor.add_node(node)
@@ -50,12 +57,43 @@ def main():
             assert mapper.last_accepted is not None,'Moving correction did not pass GICP'
             np.testing.assert_allclose(mapper.accepted_odom,odom,atol=1e-6)
             assert -0.04 < mapper.correction[0,3] < -0.01,'Correction was not smoothed'
+            # At the first waypoint, the output filter still lags the
+            # accepted correction by about 7.5cm. A nonrepeating LiDAR packet
+            # can mainly contain floor: it must not use that lag as an ICP
+            # prediction and jump to another repeated floor correspondence.
+            sparse = floor[(floor[:,0]>=-1.6)&(floor[:,0]<=1.6)&
+                           (floor[:,1]>=0.1)&(floor[:,1]<=1.5)]
+            sensors.points = sparse
+            wait_for(lambda: mapper.latest is not None and mapper.latest[0].width == len(sparse))
+            match_next()
+            assert mapper.last_accepted is not None, (
+                'Sparse waypoint-transition scan chased the filtered pose: '+mapper.last_failure)
+            np.testing.assert_allclose(mapper.accepted_match_correction[0,3],-0.1,atol=0.01)
+            print('PASS real sparse GICP uses the accepted prediction across a waypoint stop, without chasing output-filter lag',flush=True)
+            sensors.points = points
+            wait_for(lambda: mapper.latest[0].width == len(points))
             for _ in range(9):
                 match_next()
                 assert mapper.last_accepted is not None,(
                     'Identical accepted correction rejected when odometry stopped: '+mapper.last_failure)
             np.testing.assert_allclose(mapper.correction@odom,truth,atol=0.012)
             print('PASS real GICP moving correction settles while stationary without false localization loss',flush=True)
+
+            # The reported 5.5--7.4cm jumps must still be rejected when they
+            # are real contradictions in a fully observable room scan.
+            previous = mapper.accepted_match_correction.copy()
+            for displacement in (0.055,0.074):
+                sensors.truth = pose_matrix([0.4+displacement,0.,0.],[0.,0.,0.,1.])
+                match_next()
+                match_next()
+                assert mapper.last_accepted is None
+                assert 'Rejected GICP correction jump' in mapper.last_failure,mapper.last_failure
+                np.testing.assert_allclose(mapper.accepted_match_correction,previous,atol=1e-6)
+                sensors.truth = truth
+                match_next()
+                match_next()
+                assert mapper.last_accepted is not None
+            print('PASS genuine 5.5cm/7.4cm stationary jumps remain rejected and recover without poisoning the prediction',flush=True)
 
             # A genuinely new stationary jump is still rejected, and a rejected
             # measurement must not replace the accepted comparison reference.
