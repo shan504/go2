@@ -182,6 +182,85 @@ class RobotEndpoints(Node):
         self.responses.publish(response)
 
 
+class GicpEndpoints(Node):
+    def __init__(self):
+        super().__init__('go2_gicp')
+        values = dict(scan_window=0.5, registration_period=0.5, validity_timeout=1.0,
+                      voxel_size=0.15, localization_voxel_size=0.05,
+                      localization_correspondence=0.2, submap_radius=25.0,
+                      map_voxel_size=0.02, map_publish_period=3.0)
+        for name in MotionCheck.PARAMETERS['go2_gicp']:
+            self.declare_parameter(name, values[name])
+        self.status = self.create_publisher(String, '/localization/status', 10)
+        self.valid = self.create_publisher(Bool, '/localization/valid', 10)
+
+
+def localization_timeline():
+    harness = Harness()
+    try:
+        mapper = harness.add(GicpEndpoints())
+        monitor = harness.add(MotionCheck())
+        harness.wait(lambda: monitor.count_publishers('/localization/status') == 1)
+        harness.wait(lambda: mapper.status.get_subscription_count() == 1)
+        monitor.refresh()
+        harness.wait(lambda: 'go2_gicp' in monitor.parameters)
+        actual = monitor.parameters['go2_gicp']
+        assert actual['scan_window'] == 0.5 and actual['registration_period'] == 0.5
+        assert actual['validity_timeout'] == 1.0 and actual['localization_voxel_size'] == 0.05
+        subscribers = monitor.get_subscriptions_info_by_topic('/localization/status')
+        assert subscribers[0].qos_profile.durability == DurabilityPolicy.VOLATILE
+        monitor.arm()
+        for index in range(20):
+            mapper.valid.publish(Bool(data=True))
+            mapper.status.publish(String(data=(f'GICP fitness=0.99{index % 10} rmse=0.024; '
+                f'processing_time=0.{index:03d}s source_age=0.700s; clouds_received={index}')))
+            harness.spin(0.02)
+        harness.wait(lambda: monitor.latest.get('/localization/valid', (None, None))[1] is True)
+        assert sum(topic == '/localization/valid' for _, topic, _ in monitor.status_events) == 1
+        assert sum(topic == '/localization/status' for _, topic, _ in monitor.status_events) == 1
+
+        failure = 'Registration result too old; reduce cloud/submap size or processing load'
+        for index in range(20):
+            mapper.valid.publish(Bool(data=False))
+            mapper.status.publish(String(data=f'{failure}; clouds_received={index + 20}'))
+            harness.spin(0.02)
+        harness.wait(lambda: monitor.latest['/localization/valid'][1] is False)
+        status_events = [value for _, topic, value in monitor.status_events if topic == '/localization/status']
+        assert len(status_events) == 2 and failure in status_events[-1]
+        assert 'processing_time=0.019s source_age=0.700s' in monitor.summary(), (
+            'Failure status erased timing metrics from the last accepted match')
+
+        fine_failure = 'Fine GICP overlap/residual/innovation rejected: fitness=0.400 rmse=0.125'
+        mapper.status.publish(String(data=fine_failure+'; clouds_received=41'))
+        harness.wait(lambda: monitor.latest['/localization/status'][1].startswith(fine_failure))
+        recovered = ('GICP fitness=0.999 rmse=0.024; processing_time=0.081s '
+                     'source_age=0.121s; clouds_received=42')
+        mapper.valid.publish(Bool(data=True))
+        mapper.status.publish(String(data=recovered))
+        harness.wait(lambda: monitor.latest['/localization/status'][1] == recovered)
+        harness.wait(lambda: monitor.latest['/localization/valid'][1] is True)
+        bool_events = [value for _, topic, value in monitor.status_events if topic == '/localization/valid']
+        assert bool_events == [True, False, True], bool_events
+        status_events = [value for _, topic, value in monitor.status_events if topic == '/localization/status']
+        assert len(status_events) == 4 and fine_failure in status_events[-2]
+        summary = monitor.summary()
+        assert failure in summary and fine_failure in summary
+        assert 'processing_time=0.081s source_age=0.121s' in summary
+        assert 'Last accepted /localization/status:' in summary
+        assert '/go2_gicp actual parameters:' in summary
+        assert 'receipt_age=' in summary
+        assert monitor.status_events.maxlen == 64
+        for topic in ('/cmd_vel_nav', '/cmd_vel', '/api/sport/request', '/goal_pose', '/control/enable'):
+            assert monitor.count_publishers(topic) == 0, 'Read-only monitor created a command publisher'
+
+        mapper.set_parameters([Parameter('scan_window', value=0.0)])
+        harness.wait(lambda: monitor.parameters.get('go2_gicp', {}).get('scan_window') == 0.0)
+        print('PASS localization trace: volatile status, live GICP parameters, Bool/category edges, '
+              'complete failure reasons and latest processing/source ages without success flooding')
+    finally:
+        harness.close()
+
+
 def request_message(identity, api, payload):
     message = Request()
     message.header.identity.id, message.header.identity.api_id = identity, api
@@ -330,6 +409,7 @@ def rotation_only_pipeline():
 
 rclpy.init()
 try:
+    localization_timeline()
     observer_effect()
     working_pipeline()
     incompatible_pipeline(TwistStamped, 10)

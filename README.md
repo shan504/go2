@@ -90,7 +90,7 @@ GICP 仍使用 15 厘米点云及缓存的粗地图；全图每 3 秒发布一�
 bash go2_3d/run.sh localization
 # 或定位 + Nav2，运动仍默认关闭
 bash go2_3d/run.sh navigation
-# 使用稠密扫描窗口定位 + Nav2
+# 加载稠密保存的地图；实时定位仍使用单帧
 bash go2_3d/run.sh navigation dense
 # 若实际回到建图起点、同一朝向和高度，可在启动命令中给初始位姿
 bash go2_3d/run.sh navigation dense 0 0 0
@@ -113,6 +113,10 @@ cd ~/go2_nav && git pull --ff-only && bash go2_3d/tools.sh restart-navigation
 命令先禁用运动、清除旧目标，再读取新鲜有效的 GICP 位姿，以当前 XYZ 和朝向重启导航。
 因此已经走离建图起点时不用重新填 `0 0 0`，也不用重建地图或镜像。
 读取失败时保留原容器并明确报错；重启期间保持狗不动，该 SSH 终端持续运行。
+重启默认使用 `standard`。定位和导航启动时统一覆盖 `scan_window=0.0`，即使显式选择
+`dense` 也不会把建图用的0.5秒扫描累积带入实时定位；保存的完整PCD仍全部加载。
+实机285007点地图使用8帧/约1.2万点定位时，曾出现新鲜点云但已接受匹配年龄超过1秒，
+导致导航在速度升到0.30m/s之前暂停。单帧减少配准负载，原1秒期限和匹配检查保留。
 等 `/localization/valid=true` 且 `/navigation/startup_status` 显示 Nav2 启动成功后，
 在 Foxglove **重新选前方约 1～1.5 米的自由目标、单击朝向，再点启用运动**。
 启动保留的是当前位置，运动仍关闭，旧目标不会自动重发。
@@ -363,6 +367,8 @@ bash go2_3d/tools.sh motioncheck 30
 先冻结速度端点，再订阅：原生 Humble 控制器可能仅在有订阅者时发布，监测节点本身不能
 被当作正常的 `velocity_smoother` 输入。输出包含节点名、实际消息类型/QoS、控制器与平滑器
 生命周期及实际参数，以及 `/cmd_vel_nav → /cmd_vel → /api/sport/request` 的分段计数。
+也读取GICP的实际扫描窗口/配准周期/有效期限，记录定位有效性变化与完整失败原因，
+保留最近成功匹配的 `processing_time`、`source_age`，帮助判断速度爬升是否被定位暂停切断。
 前进/侧移、仅旋转、零速度分别统计；Sport API 1008 的 `x/y/z` 对应 `vx/vy/yaw_rate`。
 响应按观察到的请求 ID 和 API 配对，再与 `/odom` 位移比较。
 Humble 可能不提供请求的发布者 GID：图中只有一个发布者时明确标记为推断，

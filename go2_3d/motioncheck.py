@@ -54,6 +54,9 @@ class MotionCheck(Node):
             'progress_checker.required_movement_radius',
             'progress_checker.movement_time_allowance'],
         'go2_edu_dds_bridge': ['enable_control', 'allow_motion', 'max_linear_speed', 'max_yaw_speed'],
+        'go2_gicp': ['scan_window', 'registration_period', 'validity_timeout',
+            'voxel_size', 'localization_voxel_size', 'localization_correspondence',
+            'submap_radius', 'map_voxel_size', 'map_publish_period'],
     }
 
     def __init__(self):
@@ -61,7 +64,9 @@ class MotionCheck(Node):
         self.started = None
         self.initial = {}
         self.stats, self.type_stats, self.subscriptions_by_type = {}, {}, {}
-        self.latest, self.status_events = {}, deque(maxlen=16)
+        self.latest, self.status_events = {}, deque(maxlen=64)
+        self.status_keys = {}
+        self.latest_accepted_localization = None
         self.control_baseline = None
         self.lifecycle, self.parameters, self.parameter_receipts, self.pending = {}, {}, {}, {}
         self.request_stats, self.request_ids = {}, OrderedDict()
@@ -81,6 +86,10 @@ class MotionCheck(Node):
             return lambda message: self.status(message, topic)
         for topic in ('/control/status', '/operator/status', '/navigation/startup_status'):
             self.create_subscription(String, topic, status_callback(topic), retained)
+        # Mapper status is volatile. Requesting retained durability here would
+        # silently miss the reason immediately preceding a localization pause.
+        self.create_subscription(String, '/localization/status',
+                                 status_callback('/localization/status'), qos_profile_sensor_data)
         self.create_subscription(Bool, '/localization/valid',
                                  lambda msg: self.status(msg, '/localization/valid'), qos_profile_sensor_data)
         self.create_subscription(Odometry, '/odom', self.odom, qos_profile_sensor_data)
@@ -197,16 +206,35 @@ class MotionCheck(Node):
     def status(self, message, topic):
         now = time.monotonic()
         self.latest[topic] = (now, message.data)
-        if self.started is None or topic == '/localization/valid':
+        if topic == '/localization/status' and message.data.startswith('GICP fitness='):
+            self.latest_accepted_localization = (now, message.data)
+        if self.started is None:
             return
         if topic == '/control/status' and self.control_baseline is None:
             self.control_baseline = message.data
         value = message.data
         if topic == '/control/status':
             value = value.split(';', 1)[0]  # Ages/counters must not flood the timeline.
-        previous = next((v for _, t, v in reversed(self.status_events) if t == topic), None)
-        if value != previous:
+        key = value
+        if topic == '/localization/status':
+            key = self.localization_status_key(value)
+        if topic not in self.status_keys or key != self.status_keys[topic]:
+            self.status_keys[topic] = key
             self.status_events.append((now-self.started, topic, value))
+
+    @staticmethod
+    def localization_status_key(value):
+        # Keep full text in the event and latest sample, but detect categories
+        # rather than changing fitness, processing times and cloud counters.
+        if value.startswith('GICP fitness='):
+            return 'accepted match'
+        reason = value.removeprefix('Localization invalid: ')
+        for category in ('Registration result too old', 'Rejected GICP correction jump',
+                         'Fine GICP', 'Too few', 'overlap/residual/innovation rejected',
+                         'Waiting for', 'Initial-pose seed received'):
+            if reason.startswith(category):
+                return ('invalid' if value.startswith('Localization invalid: ') else 'status', category)
+        return reason.split(';', 1)[0]
 
     def odom(self, message):
         if self.started is None:
@@ -354,6 +382,9 @@ class MotionCheck(Node):
                      f'first={self.first_odom} last={self.last_odom}')
         for topic, (received, value) in sorted(self.latest.items()):
             lines.append(f'{topic}: {value} receipt_age={now-received:.2f}s')
+        if self.latest_accepted_localization is not None:
+            received, value = self.latest_accepted_localization
+            lines.append(f'Last accepted /localization/status: {value} receipt_age={now-received:.2f}s')
         final_status = self.latest.get('/control/status', (None, ''))[1]
         deltas = {}
         for counter in ('cmd_received', 'cmd_nonzero', 'cmd_gate_accepted',

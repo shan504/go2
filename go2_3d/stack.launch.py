@@ -2,7 +2,7 @@
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
@@ -19,6 +19,23 @@ def generate_launch_description():
     config = Path('/runtime/config')
     params = str(config/'nav2_3d.yaml')
     whitelist = '["^/(tf|tf_static|odom|point_cloud2|registered_cloud|map_cloud|map|map_metadata|scan|robot_description|initialpose|goal_pose|plan|local_plan|cmd_vel.*)$","^/camera/image/compressed$","^/(localization|operator|mapping|control|navigation)/.*$","^/(local_costmap|global_costmap)/.*$"]'
+
+    def mapper_node(context):
+        parameters = [str(root/'go2_3d/gicp.yaml'), LaunchConfiguration('gicp_params'),
+                      {'mode': mapper_mode,
+                       'map_name': ParameterValue(LaunchConfiguration('map_name'), value_type=str),
+                       'auto_initialize': ParameterValue(LaunchConfiguration('auto_initialize'), value_type=bool),
+                       **{key: ParameterValue(LaunchConfiguration(key), value_type=float)
+                          for key in ('initial_x', 'initial_y', 'initial_z', 'initial_yaw_degrees')}}]
+        if mode.perform(context) != 'mapping':
+            # Dense mapping accumulates packets to enrich the saved PCD. Live
+            # localization must finish before the original 1s source deadline;
+            # use one fresh packet even when loading a map with the dense profile.
+            # The complete PCD, fine GICP resolution and acceptance limits remain.
+            parameters.append({'scan_window': 0.0})
+        return [Node(executable='/usr/bin/python3', name='go2_gicp', output='screen',
+                     arguments=[str(root/'go2_3d/mapper.py')], parameters=parameters)]
+
     return LaunchDescription([
         DeclareLaunchArgument('mode',default_value='mapping',choices=['mapping','localization','navigation']),
         DeclareLaunchArgument('map_name',default_value='default'),
@@ -41,13 +58,7 @@ def generate_launch_description():
              arguments=[str(root/'patches/sensors/go2_camera_sample.py')]),
         Node(package='robot_state_publisher',executable='robot_state_publisher',output='screen',
              parameters=[{'robot_description':(config/'go2_edu.urdf').read_text(),'use_sim_time':False}]),
-        Node(executable='/usr/bin/python3',name='go2_gicp',output='screen',
-             arguments=[str(root/'go2_3d/mapper.py')],
-             parameters=[str(root/'go2_3d/gicp.yaml'),LaunchConfiguration('gicp_params'),{'mode':mapper_mode,
-                 'map_name':ParameterValue(LaunchConfiguration('map_name'),value_type=str),
-                 'auto_initialize':ParameterValue(LaunchConfiguration('auto_initialize'),value_type=bool),
-                 **{key:ParameterValue(LaunchConfiguration(key),value_type=float)
-                    for key in ('initial_x','initial_y','initial_z','initial_yaw_degrees')}}]),
+        OpaqueFunction(function=mapper_node),
         Node(executable='/usr/bin/python3',name='go2_operator',output='screen',
              arguments=[str(root/'go2_3d/operator_bridge.py')],parameters=[{'mode':mode}]),
         Node(package='pointcloud_to_laserscan',executable='pointcloud_to_laserscan_node',output='screen',

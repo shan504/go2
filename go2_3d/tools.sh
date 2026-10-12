@@ -25,7 +25,7 @@ case "${1:-check}" in
     ;;
   restart-navigation)
     [[ $# -le 2 ]] || { echo 'Usage: tools.sh restart-navigation [standard|dense]' >&2; exit 2; }
-    profile="${2:-dense}"
+    profile="${2:-standard}"
     case "$profile" in standard|dense) ;; *) echo 'Profile must be standard or dense' >&2; exit 2 ;; esac
     project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
     if [[ "$(sudo docker inspect --format '{{.State.Running}}' go2-3d 2>/dev/null || true)" != true ]]; then

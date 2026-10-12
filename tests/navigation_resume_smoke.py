@@ -104,5 +104,9 @@ else: os.execv('/bin/bash',['bash',*sys.argv[1:]])
     result = subprocess.run(['/bin/bash', str(fake_project/'go2_3d/tools.sh'), 'restart-navigation'],
                             env=environment, capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, (result.stdout, result.stderr)
+    assert json.loads(log.read_text()) == ['navigation','standard','0.423','0.025','30','0.351']
+    result = subprocess.run(['/bin/bash', str(fake_project/'go2_3d/tools.sh'), 'restart-navigation', 'dense'],
+                            env=environment, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, (result.stdout, result.stderr)
     assert json.loads(log.read_text()) == ['navigation','dense','0.423','0.025','30','0.351']
 print('PASS navigation restart: valid current map XYZ/yaw, invalid/stale refusal without robot writes, retained numeric pose passed to launcher')

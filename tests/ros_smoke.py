@@ -5,6 +5,7 @@ import threading
 import tempfile
 from pathlib import Path
 import numpy as np
+import open3d as o3d
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
 import rclpy
 from rclpy.node import Node
@@ -87,6 +88,16 @@ def phase(directory,mode,dense=False,auto=False):
                  '-p',f'map_directory:={directory}/latest','-p','map_name:=indoor']
     if dense:
         arguments += ['--params-file',str(Path(__file__).resolve().parents[1]/'go2_3d/gicp_dense.yaml')]
+    original_map = None
+    if mode == 'localization':
+        # Match stack.launch: dense accumulation enriches mapping only. A
+        # dense saved map is reloaded in full, with one live scan per match.
+        # Use the same named-node YAML override as launch_ros; a wildcard
+        # CLI -p alone has lower precedence than the named dense YAML.
+        single_frame = Path(directory)/'single_frame_localization.yaml'
+        single_frame.write_text('go2_gicp:\n  ros__parameters:\n    scan_window: 0.0\n')
+        arguments += ['--params-file',str(single_frame)]
+        original_map = (Path(directory)/'latest/map.pcd').read_bytes()
     if auto:
         arguments += ['-p','auto_initialize:=true','-p','initial_x:=0.0','-p','initial_y:=0.0','-p','initial_yaw_degrees:=0.0']
     rclpy.init(args=arguments)
@@ -130,7 +141,6 @@ def phase(directory,mode,dense=False,auto=False):
             wait_for(lambda: 'Save success=True' in sensors.operator_status)
             for name in ('map.pcd','nav.yaml','nav.pgm','metadata.yaml'):
                 assert (Path(directory)/'latest'/name).is_file(),name
-            import open3d as o3d
             saved = o3d.io.read_point_cloud(str(Path(directory)/'latest/map.pcd'))
             assert (Path(directory)/'latest').resolve().parent == Path(directory)/'library/indoor'
             assert (Path(directory)/'library/indoor/latest').resolve() == (Path(directory)/'latest').resolve()
@@ -157,6 +167,10 @@ def phase(directory,mode,dense=False,auto=False):
             if auto:
                 assert mapper.initial_hint_used,'Numerical startup pose was not used'
             wait_for(lambda: 'fine=True' in sensors.localization_status)
+            assert mapper.p['scan_window'] == mapper.get_parameter('scan_window').value == 0.0
+            assert 'scan_frames=1 ' in sensors.localization_status, sensors.localization_status
+            saved = o3d.io.read_point_cloud(str(Path(directory)/'latest/map.pcd'))
+            assert len(mapper.points) == len(saved.points), 'Single-frame localization truncated the saved map'
             wait_for(lambda: sensors.correction_matches(np.eye(4)))
             wait_for(lambda: sensors.buffer.can_transform('map','base_footprint',Time()))
             footprint = transform_matrix(sensors.buffer.lookup_transform('map','base_footprint',Time()).transform)
@@ -206,6 +220,7 @@ def phase(directory,mode,dense=False,auto=False):
             stale_stamp = sensors.correction_stamp()
             time.sleep(0.3)
             assert sensors.correction_stamp() == stale_stamp,'Stale odometry kept refreshing TF'
+            assert (Path(directory)/'latest/map.pcd').read_bytes() == original_map
             print('PASS ROS localization: PCD reload + fine GICP + live TF between matches + rejected/stale TF stops')
     finally:
         sensors.stop.set()
