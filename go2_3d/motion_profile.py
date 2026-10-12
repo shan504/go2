@@ -8,10 +8,33 @@ YAW_ACCELERATION = 0.60
 TRAJECTORY_TIME = 1.20
 FORWARD_SAMPLES = 2
 ARRIVAL_RADIUS = 0.30
+PATH_HEADING_THRESHOLD = 0.35
+PATH_HEADING_RELEASE = 0.20
+PROGRESS_ANGLE = 0.20
 
 
 def configure_navigation(nav):
-    follow = nav['controller_server']['ros__parameters']['FollowPath']
+    controller = nav['controller_server']['ros__parameters']
+    follow = controller['FollowPath']
+    # DWB's short-horizon scoring can stall when the next waypoint is behind
+    # the body. The official shim aligns with the NEW PATH before handing
+    # control back to the same DWB tracker and real footprint collision check.
+    follow.update(plugin='nav2_rotation_shim_controller::RotationShimController',
+                  primary_controller='dwb_core::DWBLocalPlanner',
+                  angular_dist_threshold=PATH_HEADING_THRESHOLD,
+                  angular_disengage_threshold=PATH_HEADING_RELEASE,
+                  forward_sampling_distance=0.25,
+                  rotate_to_heading_angular_vel=YAW_SPEED,
+                  max_angular_accel=YAW_ACCELERATION,
+                  simulate_ahead_time=1.0, rotate_to_goal_heading=False,
+                  closed_loop=False)
+    # A 180-degree turn at 0.30rad/s takes over 10s. Recognize actual heading
+    # progress instead of mistaking an in-place turn for a positional stall.
+    # A genuinely stationary robot still fails after the same 10s deadline.
+    controller['progress_checker'].update(
+        plugin='nav2_controller::PoseProgressChecker',
+        required_movement_radius=0.10, required_movement_angle=PROGRESS_ANGLE,
+        movement_time_allowance=10.0)
     # StandardTrajectoryGenerator samples across sim_time, rather than one
     # controller tick. From rest, 0.4 * 1.2 reaches the verified 0.30m/s.
     # Two X samples retain 0 for turns and 0.30 for forward trajectories.

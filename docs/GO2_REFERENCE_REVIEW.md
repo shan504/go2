@@ -348,3 +348,30 @@ ABORTED/拒绝/下一点失效时保留失败点及尾部，显式resume才重�
 原点、PCD、栅格及定位参数不变。新农场保存使用独立名称和新时间戳，任何旧版本均不覆盖。
 归档不改变当前加载地图；切换拒绝运行中的容器。单元回归覆盖多版本/幂等归档、复制中断、
 无效路径、历史版本切换、命名图清理仍保留PCD；ROS模拟传感器验证标准/稠密地图保存和重载定位。
+
+## 第二段大角度起步转向（2026-10-12）
+
+本次用户实机日志为第一点SUCCEEDED、误差0.276m，第二点自动发送且接受，
+随后10秒 `Failed to make progress`；没有定位丢失取消。用户确认第二段基本不转身。
+这个日志证明队列和动作切换已执行，不包含当时完整速度/代价格数据，不能仅凭它
+断言具体是哪条DWB轨迹打分造成了不动。
+
+查阅并核对在线官方Humble分支与本地检出一致（3c3db59）：
+- [Rotation Shim README](https://github.com/ros-navigation/navigation2/blob/humble/nav2_rotation_shim_controller/README.md)
+  明确列出DWB新路径起步时大方向差可能不能干净地原地旋转，建议由shim先转向再交接。
+- [SimpleProgressChecker](https://github.com/ros-navigation/navigation2/blob/humble/nav2_controller/plugins/simple_progress_checker.cpp)
+  只计算XY距离；[PoseProgressChecker](https://github.com/ros-navigation/navigation2/blob/humble/nav2_controller/plugins/pose_progress_checker.cpp)
+  加入最短角距离进展。0.30rad/s原地转180°需要超过10秒，不能只靠XY进展判定。
+
+配置采用官方RotationShimController包装原DWB，20°触发、11.5°交接，
+角速度0.30、角加速度0.60，closed_loop=false从上一条命令递增，不依赖尚未转身时
+接近零的实测yaw速度。仍保留官方旋转外形碰撞检查和DWB的真实外形检查。
+PoseProgressChecker用10cm或约11.5°作为进展，10秒实际停滞超时不变；
+不修改定位、地图、膨胀、终点位置容差或FIFO，失败不自动跳过。
+启动前检查插件XML及开环字段；旧镜像缺支持明确要求重建，而非悄悄忽略参数。
+
+验证编译未改动的官方Humble shim、TF转换、真实Costmap2D/外形碰撞算法及进展检查。
+云环境只适配Costmap2DROS生命周期包装，路径跟踪交接用确定性测试观察器，
+不把它当作完整DWB或实机验证。覆盖左右126°/179°路径、每秒重规划、零实测角速度下
+的命令递增与0.30m/s交接；复现旧进展超时、新进展识别真实转动，仍拒绝停滞/微抖/角度绕回。
+致命障碍和跟踪未知区域会拒绝旋转。完整第二段仍需用户实机复测。

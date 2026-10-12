@@ -16,13 +16,20 @@ before = {p:p.read_bytes() for p in sdk.rglob('*') if p.is_file()}
 module.get_package_share_directory = lambda package: str(sdk)
 module.main()
 params = yaml.safe_load(Path('/runtime/config/nav2_3d.yaml').read_text())
-from motion_profile import LINEAR_SPEED, YAW_SPEED, LINEAR_ACCELERATION, TRAJECTORY_TIME, ARRIVAL_RADIUS
+from motion_profile import (LINEAR_SPEED, YAW_SPEED, LINEAR_ACCELERATION, TRAJECTORY_TIME,
+                            ARRIVAL_RADIUS, PATH_HEADING_THRESHOLD, PATH_HEADING_RELEASE, PROGRESS_ANGLE)
 follow = params['controller_server']['ros__parameters']['FollowPath']
 smoother = params['velocity_smoother']['ros__parameters']
 assert follow['max_vel_x'] == follow['max_speed_xy'] == smoother['max_velocity'][0] == LINEAR_SPEED == 0.30
 assert follow['max_vel_theta'] == smoother['max_velocity'][2] == YAW_SPEED
 assert follow['min_vel_x'] == smoother['min_velocity'][0] == 0.0
 assert follow['min_vel_y'] == follow['max_vel_y'] == 0.0
+assert follow['plugin'] == 'nav2_rotation_shim_controller::RotationShimController'
+assert follow['primary_controller'] == 'dwb_core::DWBLocalPlanner'
+assert follow['angular_dist_threshold'] == PATH_HEADING_THRESHOLD
+assert follow['angular_disengage_threshold'] == PATH_HEADING_RELEASE < PATH_HEADING_THRESHOLD
+assert follow['rotate_to_heading_angular_vel'] == YAW_SPEED
+assert follow['closed_loop'] is False and follow['rotate_to_goal_heading'] is False
 assert follow['vx_samples'] == 2 and follow['vy_samples'] == 1
 assert follow['trajectory_generator_name'] == 'dwb_plugins::StandardTrajectoryGenerator'
 assert follow['limit_vel_cmd_in_traj'] is False
@@ -36,6 +43,8 @@ assert checker['xy_goal_tolerance'] == ARRIVAL_RADIUS == 0.30
 assert checker['yaw_goal_tolerance'] == math.pi and checker['stateful'] is False
 assert 'RotateToGoal' not in follow['critics']
 assert params['controller_server']['ros__parameters']['progress_checker']['movement_time_allowance'] == 10.0
+assert params['controller_server']['ros__parameters']['progress_checker']['plugin'] == 'nav2_controller::PoseProgressChecker'
+assert params['controller_server']['ros__parameters']['progress_checker']['required_movement_angle'] == PROGRESS_ANGLE
 assert 'amcl' not in params
 for name in ('local_costmap','global_costmap'):
     cfg = params[name][name]['ros__parameters']

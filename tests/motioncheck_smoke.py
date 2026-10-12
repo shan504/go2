@@ -1,6 +1,7 @@
 """Exercise read-only velocity tracing on isolated ROS endpoints, no robot."""
 import copy
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -61,6 +62,11 @@ class Controller(Node):
         self.declare_parameter('controller_frequency', 10.0)
         self.declare_parameter('FollowPath.max_vel_x', 0.15)
         self.declare_parameter('FollowPath.max_speed_xy', 0.15)
+        self.declare_parameter('FollowPath.plugin', 'nav2_rotation_shim_controller::RotationShimController')
+        self.declare_parameter('FollowPath.primary_controller', 'dwb_core::DWBLocalPlanner')
+        self.declare_parameter('FollowPath.closed_loop', False)
+        self.declare_parameter('progress_checker.plugin', 'nav2_controller::PoseProgressChecker')
+        self.declare_parameter('progress_checker.required_movement_angle', 0.20)
         for name in MotionCheck.PARAMETERS['controller_server']:
             if not self.has_parameter(name):
                 self.declare_parameter(name, 0.001)
@@ -92,6 +98,8 @@ def observer_effect():
         monitor.refresh()
         harness.wait(lambda: 'controller_server' in monitor.parameters)
         assert monitor.parameters['controller_server']['FollowPath.max_vel_x'] == 0.15
+        assert monitor.parameters['controller_server']['FollowPath.closed_loop'] is False
+        assert monitor.parameters['controller_server']['progress_checker.plugin'] == 'nav2_controller::PoseProgressChecker'
         harness.spin(0.15)
         assert controller.sent == 0, 'MotionCheck subscribed to velocities before arming'
         assert '/cmd_vel_nav' not in monitor.stats
@@ -406,7 +414,14 @@ def rotation_only_pipeline():
         monitor.arm()
         harness.wait(lambda: monitor.stats['/cmd_vel'].rotation_only >= 3)
         assert monitor.stats['/cmd_vel'].xy == 0
-        assert 'FINDING: /cmd_vel contains rotation only; XY progress checking can still time out.' in monitor.summary()
+        assert 'FINDING: /cmd_vel contains rotation only; compare odometry heading change' in monitor.summary()
+        for heading in (3.12, -3.12, -2.92):
+            message = Odometry()
+            message.pose.pose.orientation.z = math.sin(heading/2)
+            message.pose.pose.orientation.w = math.cos(heading/2)
+            monitor.odom(message)
+        assert 0.23 < monitor.odom_max_yaw < 0.26, 'Heading wraparound reported a full-circle turn'
+        assert 'max_heading_change=' in monitor.summary()
         print('PASS velocity trace: yaw-only commands remain distinct from XY progress')
     finally:
         harness.close()

@@ -360,6 +360,18 @@ bash go2_3d/tools.sh inflation-5cm
 已发布 Move 请求或响应 code=0 也不能代替真实里程计/现场运动确认。
 `tools.sh enable/disable` 与 Foxglove 同走 `/control/enable`，使暂存目标启动与取消行为一致。
 
+第二个巡检点需要大角度转身时，使用 Humble 官方
+[Rotation Shim](https://github.com/ros-navigation/navigation2/tree/humble/nav2_rotation_shim_controller)
+先对准新路径，再交给原来的 DWB 跟踪器，前进速度仍为 0.30m/s。
+超过约 20° 开始原地转向，对准至约 11.5° 后交接；转向最多 0.30rad/s，
+保持 0.60rad/s² 加速度限制，按命令开环递增，避免尚未迈步时接近零的里程计角速度阻止起步。
+每秒重新规划的路径仍经过这一检查，转向使用 Nav2 原有的真实外形碰撞检查；
+遇到转向碰撞会退回 DWB，仍可能无法通过狭窄区域，不绕过障碍。
+`PoseProgressChecker` 将位置移动 10cm 或朝向改变约 11.5° 视为进展，
+真正既不前进也不转身仍按原来的 10 秒超时；终点仍只要求位置进入 30cm，不要求朝向。
+启动前检查这两个插件及 shim 的开环支持；旧镜像缺少支持时需先执行 `bash go2_3d/build.sh`。
+`motioncheck` 回读实际插件/转向参数并报告里程计最大朝向变化，区分“有转向命令”与“实际转身”。
+
 目标已接受、控制器收到路径却没有移动时，先记录完整速度链路。保持导航启动终端运行，
 在第二个 SSH 终端执行：
 

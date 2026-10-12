@@ -48,10 +48,14 @@ class MotionCheck(Node):
             'max_velocity', 'min_velocity', 'max_accel', 'max_decel', 'deadband_velocity'],
         'controller_server': ['controller_frequency', 'min_x_velocity_threshold',
             'min_y_velocity_threshold', 'min_theta_velocity_threshold',
+            'FollowPath.plugin', 'FollowPath.primary_controller',
+            'FollowPath.angular_dist_threshold', 'FollowPath.angular_disengage_threshold',
+            'FollowPath.rotate_to_heading_angular_vel', 'FollowPath.closed_loop',
             'FollowPath.max_vel_x', 'FollowPath.max_vel_y', 'FollowPath.max_vel_theta',
             'FollowPath.min_speed_xy', 'FollowPath.max_speed_xy',
             'FollowPath.vx_samples', 'FollowPath.trajectory_generator_name',
-            'progress_checker.required_movement_radius',
+            'progress_checker.plugin', 'progress_checker.required_movement_radius',
+            'progress_checker.required_movement_angle',
             'progress_checker.movement_time_allowance'],
         'go2_edu_dds_bridge': ['enable_control', 'allow_motion', 'max_linear_speed', 'max_yaw_speed'],
         'go2_gicp': ['scan_window', 'registration_period', 'validity_timeout',
@@ -78,6 +82,7 @@ class MotionCheck(Node):
         self.request_publishers = set()
         self.first_odom = self.last_odom = None
         self.odom_samples, self.odom_max_distance = 0, 0.0
+        self.odom_unwrapped_yaw = self.odom_max_yaw = 0.0
         self.state_clients = {name: self.create_client(GetState, f'/{name}/get_state')
                               for name in ('controller_server', 'velocity_smoother', 'bt_navigator')}
         self.parameter_clients = {name: self.create_client(GetParameters, f'/{name}/get_parameters')
@@ -244,6 +249,10 @@ class MotionCheck(Node):
         pose = message.pose.pose
         q = pose.orientation
         yaw = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
+        if self.last_odom is not None:
+            difference = yaw-self.last_odom[2]
+            self.odom_unwrapped_yaw += math.atan2(math.sin(difference), math.cos(difference))
+            self.odom_max_yaw = max(self.odom_max_yaw, abs(self.odom_unwrapped_yaw))
         self.last_odom = (pose.position.x, pose.position.y, yaw)
         if self.first_odom is None:
             self.first_odom = self.last_odom
@@ -381,6 +390,7 @@ class MotionCheck(Node):
         lines.append('Published Move or response code=0 is not proof of physical movement; '
                      'missing responses alone do not prove failure.')
         lines.append(f'/odom: messages={self.odom_samples} max_xy_displacement={self.odom_max_distance:.4f}m '
+                     f'max_heading_change={math.degrees(self.odom_max_yaw):.1f}deg '
                      f'first={self.first_odom} last={self.last_odom}')
         for topic, (received, value) in sorted(self.latest.items()):
             lines.append(f'{topic}: {value} receipt_age={now-received:.2f}s')
@@ -432,7 +442,8 @@ class MotionCheck(Node):
         if nav and nav.xy and (not final or not final.xy):
             lines.append('FINDING: controller XY velocity observed, but no final /cmd_vel XY velocity.')
         if final and final.rotation_only and not final.xy:
-            lines.append('FINDING: /cmd_vel contains rotation only; XY progress checking can still time out.')
+            lines.append('FINDING: /cmd_vel contains rotation only; compare odometry heading change '
+                         'with the actual progress_checker plugin and angle threshold.')
         if final and final.xy:
             own = self.request_stats.get('/go2_edu_dds_bridge')
             unassigned = self.request_stats.get('UNATTRIBUTED')
