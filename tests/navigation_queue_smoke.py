@@ -125,6 +125,9 @@ def main():
         print('PASS ordered queue, append during execution, real enable readback, failure pause and explicit retry')
 
         click(0.4)
+        wait_for(lambda: len(operator.waypoints)==1)
+        assert endpoints.goals==5,'New route started before Enable'
+        endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: endpoints.goals==6 and operator.goal_handle is not None)
         click(0.8)
         wait_for(lambda: len(operator.waypoints)==1)
@@ -144,6 +147,8 @@ def main():
         # Stop during acceptance must cancel that late handle and clear its tail.
         endpoints.accept_wait.clear()
         click(0.4)
+        wait_for(lambda: len(operator.waypoints)==1)
+        endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: operator.goal_pending)
         click(0.8)
         wait_for(lambda: len(operator.waypoints)==1)
@@ -157,21 +162,28 @@ def main():
         assert endpoints.goals==7 and not operator.waypoints
         endpoints.reject_next = True
         click(1.0)
+        wait_for(lambda: len(operator.waypoints)==1)
+        endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: operator.route_paused and not operator.goal_pending)
         assert endpoints.goals==7 and operator.waiting_goal.pose.position.x==1.0
         endpoints.cancel.publish(Empty())
         wait_for(lambda: not operator.waypoints and not operator.route_paused)
         click(0.4)
+        wait_for(lambda: len(operator.waypoints)==1)
+        endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: endpoints.goals==8 and operator.goal_handle is not None)
         click(0.8)
         wait_for(lambda: len(operator.waypoints)==1)
         endpoints.valid = False
-        wait_for(lambda: endpoints.cancels==2 and operator.goal_handle is None and not operator.waypoints)
+        wait_for(lambda: endpoints.cancels==2 and operator.goal_handle is None and operator.route_paused)
+        assert [p.pose.position.x for _,p in operator.waypoints]==[0.4,0.8]
         endpoints.valid = True
         wait_for(operator.localized)
         time.sleep(0.2)
         assert endpoints.goals==8
-        print('PASS next-goal costmap revalidation, pending-acceptance stop, rejection pause and localization-loss cancellation')
+        endpoints.cancel.publish(Empty())
+        wait_for(lambda: not operator.waypoints and not operator.route_paused)
+        print('PASS next-goal costmap revalidation, pending-acceptance stop, rejection pause and localization-loss route retention')
     finally:
         endpoints.accept_wait.set()
         executor.shutdown()

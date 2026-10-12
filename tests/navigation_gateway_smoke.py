@@ -175,6 +175,9 @@ if __name__ == '__main__':
         endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: endpoints.get_parameter('enable_control').value is True)
         endpoints.goal.publish(pose)
+        wait_for(lambda: operator.waiting_goal is not None)
+        assert endpoints.goals==0
+        endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: endpoints.goals == 1 and operator.goal_handle is not None)
         assert endpoints.last_goal.header.frame_id == 'map'
         assert endpoints.last_goal.pose.position.x == 1.0
@@ -207,13 +210,15 @@ if __name__ == '__main__':
         assert endpoints.goals==2
         endpoints.enable.publish(Bool(data=False))
         wait_for(lambda: endpoints.get_parameter('enable_control').value is False)
-        # Localization loss discards a held waypoint; it cannot silently resume.
+        # Localization loss retains a held waypoint without silently resuming.
         endpoints.goal.publish(pose)
         wait_for(lambda: 'Goal queued' in endpoints.operator_status)
         endpoints.valid = False
-        wait_for(lambda: operator.waiting_goal is None and not operator.localized())
+        wait_for(lambda: operator.waiting_goal is not None and operator.route_paused and not operator.localized())
         endpoints.valid = True
         wait_for(operator.localized)
+        endpoints.cancel.publish(Empty())
+        wait_for(lambda: not operator.waypoints and not operator.route_paused)
         # Revalidate costmaps at dispatch, not only when the user first clicks.
         endpoints.goal.publish(pose)
         wait_for(lambda: 'Goal queued' in endpoints.operator_status)
@@ -236,13 +241,20 @@ if __name__ == '__main__':
         local.data = [0]*100
         wait_for(lambda: operator.grids['/local_costmap/costmap'][0].info.width==10)
         endpoints.goal.publish(pose)
+        wait_for(lambda: operator.waiting_goal is not None)
+        endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: endpoints.goals == 3 and operator.goal_handle is not None)
         endpoints.valid = False
         wait_for(lambda: endpoints.cancels == 3 and operator.goal_handle is None)
         endpoints.valid = True
         wait_for(operator.localized)
+        assert operator.waiting_goal is not None
+        endpoints.cancel.publish(Empty())
+        wait_for(lambda: not operator.waypoints and not operator.route_paused)
         endpoints.abort_goal = True
         endpoints.goal.publish(pose)
+        wait_for(lambda: operator.waiting_goal is not None)
+        endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: endpoints.goals==4 and operator.last_goal_status==6 and operator.goal_handle is None)
         endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: 'previous goal failed; fix route and send a new goal' in endpoints.operator_status)
@@ -252,6 +264,8 @@ if __name__ == '__main__':
         endpoints.abort_goal, endpoints.succeed_goal = False,True
         pose.pose.position.x = 0.20
         endpoints.goal.publish(pose)
+        wait_for(lambda: operator.waiting_goal is not None)
+        endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: endpoints.goals==5 and operator.last_goal_status==4 and operator.goal_handle is None)
         wait_for(lambda: '(SUCCEEDED); reached waypoint' in endpoints.operator_status)
         assert 'final XY error=0.200m' in endpoints.operator_status
@@ -260,6 +274,8 @@ if __name__ == '__main__':
         # success just because the last TF lies inside the arrival radius.
         endpoints.abort_goal, endpoints.succeed_goal = True,False
         endpoints.goal.publish(pose)
+        wait_for(lambda: operator.waiting_goal is not None)
+        endpoints.enable.publish(Bool(data=True))
         wait_for(lambda: endpoints.goals==6 and operator.last_goal_status==6 and operator.goal_handle is None)
         wait_for(lambda: '(ABORTED)' in endpoints.operator_status)
         assert 'final XY error=0.200m' in endpoints.operator_status

@@ -36,11 +36,14 @@ class Operator(Node):
         self.waypoints = deque()
         self.inflight_waypoint = None
         self.route_paused = False
+        self.route_pause_reason = None
+        self.route_started = False
         self.waypoint_number = 0
         self.completed_waypoints = 0
         self.goal_generation = 0
         self.motion_generation = 0
         self.enable_query = None
+        self.pause_disable_future = None
         self.startup_status = 'startup status not received'
         self.grids = {}
         self.buffer = Buffer()
@@ -70,12 +73,17 @@ class Operator(Node):
         self.create_subscription(Empty,'/navigation/resume',self.on_resume,1)
         self.create_subscription(PoseStamped,'/goal_pose',self.on_goal,100)
         self.create_timer(0.1,self.watchdog)
-        self.report(f'Operator ready: mode={self.mode}; goals require live localization and free costmap cells')
+        # Full snapshots also recover the numbered route after a panel
+        # reconnects with a volatile subscription, without changing motion.
+        if self.mode == 'navigation':
+            self.create_timer(1.0,self.publish_waypoints)
+        self.report(f'Operator ready: mode={self.mode}; collect /goal_pose waypoints then enable motion; execution requires live localization and free costmap cells')
 
     def report(self,text):
         if self.mode == 'navigation':
             current = self.inflight_waypoint[0] if self.inflight_waypoint else '-'
             text += f'; route current={current} queued={len(self.waypoints)} completed={self.completed_waypoints} paused={self.route_paused}'
+            text += f' started={self.route_started}'
             self.publish_waypoints()
         self.status.publish(String(data=text))
         self.get_logger().info(text)
@@ -118,15 +126,53 @@ class Operator(Node):
 
     def watchdog(self):
         if not self.localized() and (self.goal_handle is not None or self.goal_pending or self.waiting_goal is not None):
-            if self.waiting_goal is not None:
-                self.report('Queued goal discarded: live localization lost; select a new goal after relocalizing')
-            self.on_cancel(Empty())
+            if not self.route_paused:
+                self.pause_for_localization()
         if self.enable_query is not None and time.monotonic()-self.enable_query[2] > 2.0:
             future,_,_ = self.enable_query
             self.enable_query = None
             self.motion_state.remove_pending_request(future)
             self.on_cancel(Empty())
             self.report('Goal rejected: motion bridge state query timed out')
+
+    def pause_for_localization(self):
+        # Retain map waypoints, but stop/cancel the action. Recovery alone
+        # never resumes motion: the user must explicitly enable the route.
+        self.goal_generation += 1
+        self.route_started = False
+        self.route_paused = True
+        self.route_pause_reason = 'localization'
+        if self.inflight_waypoint is not None:
+            self.waypoints.appendleft(self.inflight_waypoint)
+            self.inflight_waypoint = None
+        if self.enable_query is not None:
+            future,_,_ = self.enable_query
+            self.enable_query = None
+            self.motion_state.remove_pending_request(future)
+        if self.goal_pending:
+            self.cancel_requested = True
+        # Canceling an action is asynchronous. Disable the real bridge too,
+        # so newly arriving controller commands cannot move it on recovery.
+        if self.parameters.service_is_ready() and self.pause_disable_future is None:
+            request = SetParameters.Request()
+            request.parameters = [Parameter('enable_control',value=False).to_parameter_msg()]
+            future = self.parameters.call_async(request)
+            self.pause_disable_future = future
+            generation = self.goal_generation
+            def disabled(result):
+                if self.pause_disable_future is result:
+                    self.pause_disable_future = None
+                if generation != self.goal_generation:
+                    return
+                try:
+                    results = result.result().results
+                    if len(results)!=1 or not results[0].successful:
+                        self.report('Route paused; motion bridge disable rejected; action cancellation requested')
+                except Exception as error:
+                    self.report(f'Route paused; motion bridge disable failed: {error}; action cancellation requested')
+            future.add_done_callback(disabled)
+        self.cancel_active_goal()
+        self.report('Route paused: live localization lost; waypoints retained; enable motion after localization recovers')
 
     def on_save(self,message):
         if self.mode != 'mapping':
@@ -147,12 +193,18 @@ class Operator(Node):
     def on_enable(self,message):
         self.motion_generation += 1
         generation = self.motion_generation
+        route_generation = self.goal_generation
         enabled = bool(message.data)
+        start_route = enabled and self.waiting_goal is not None
         if not enabled:
             # Cancellation must still work if the parameter service is down.
             self.on_cancel(Empty())
+            route_generation = self.goal_generation
         if message.data and (self.mode != 'navigation' or not self.localized()):
             self.report('Enable rejected: navigation mode and live GICP localization required')
+            return
+        if enabled and self.pause_disable_future is not None:
+            self.report('Enable deferred: waiting for paused motion to disable; enable again after it stops')
             return
         if enabled and not self.action.server_is_ready():
             self.report(f'Enable rejected: Nav2 NavigateToPose action unavailable; {self.startup_status}')
@@ -164,7 +216,7 @@ class Operator(Node):
         request.parameters = [Parameter('enable_control',value=bool(message.data)).to_parameter_msg()]
         future = self.parameters.call_async(request)
         def done(result):
-            if generation != self.motion_generation:
+            if generation != self.motion_generation or route_generation != self.goal_generation:
                 return
             try:
                 results = result.result().results
@@ -172,16 +224,23 @@ class Operator(Node):
                 text = 'Motion enable=%s; parameter accepted=%s' % (enabled,accepted)
                 if not accepted:
                     text += '; '+('; '.join(r.reason for r in results) or 'missing parameter result')
-                elif enabled and self.waiting_goal is not None:
-                    if self.route_paused:
+                elif start_route and self.waiting_goal is not None:
+                    if not self.localized():
+                        if not self.route_paused:
+                            self.pause_for_localization()
+                        return
+                    if self.route_paused and self.route_pause_reason != 'localization':
                         self.report(text+'; previous goal failed; fix route and send a new goal after cancelling, or tools.sh resume to retry; route paused')
                         return
+                    self.route_paused = False
+                    self.route_pause_reason = None
+                    self.route_started = True
                     self.report(text)
                     self.check_motion_state()
                     return
                 elif enabled and self.goal_handle is None and not self.goal_pending:
                     text += ('; previous goal failed; fix route and send a new goal' if self.last_goal_status==6
-                             else '; no active navigation goal; publish /goal_pose to start')
+                             else '; no active navigation goal; select /goal_pose waypoints then enable motion to start')
                 self.report(text)
             except Exception as error:
                 self.report(f'Motion parameter failed: {error}')
@@ -190,6 +249,8 @@ class Operator(Node):
     def on_cancel(self,message):
         self.goal_generation += 1
         self.route_paused = False
+        self.route_pause_reason = None
+        self.route_started = False
         if self.waiting_goal is not None:
             self.waypoints.clear()
             self.report('Queued navigation goal cancelled')
@@ -218,12 +279,14 @@ class Operator(Node):
             self.report('Resume rejected: live GICP localization required')
             return
         self.route_paused = False
+        self.route_pause_reason = None
+        self.route_started = True
         self.report('Retrying paused waypoint; remaining order preserved')
         self.check_motion_state()
 
     def on_goal(self,message):
-        if self.action is None or not self.localized():
-            self.report('Goal rejected: navigation mode and live GICP localization required')
+        if self.action is None:
+            self.report('Goal rejected: navigation mode required')
             return
         if message.header.frame_id != 'map':
             self.report(f'Goal rejected: frame_id={message.header.frame_id!r}; set the Foxglove 3D display frame to map')
@@ -244,21 +307,31 @@ class Operator(Node):
             self.report(f'Goal rejected: Nav2 NavigateToPose action unavailable; {self.startup_status}')
             return
         try:
-            self.validate_goal(message)
+            if self.localized():
+                self.validate_goal(message)
+            else:
+                self.validate_map_goal(message)
         except (ValueError,TransformException) as error:
             self.report(f'Goal rejected: {error}')
             return
-        # Selecting a waypoint must not start Nav2's progress timer while the
-        # motion bridge is disabled. Read the real bridge state, not a UI cache.
+        # New routes are collected until an explicit Enable, even if the
+        # bridge remained enabled after the previous route completed.
         if not self.waypoints and self.inflight_waypoint is None:
             self.waypoint_number = self.completed_waypoints = 0
         self.waypoint_number += 1
         self.waypoints.append((self.waypoint_number,copy.deepcopy(message)))
         self.report(f'Waypoint #{self.waypoint_number} appended at ({message.pose.position.x:.2f}, {message.pose.position.y:.2f})')
-        self.check_motion_state()
+        if not self.localized():
+            if not self.route_paused:
+                self.pause_for_localization()
+        elif self.route_started:
+            self.check_motion_state()
+        else:
+            self.report('Goal queued; collect remaining /goal_pose waypoints, then enable motion once to start the route')
 
     def check_motion_state(self):
-        if self.waiting_goal is None or self.route_paused or self.goal_handle is not None or self.goal_pending:
+        if (not self.route_started or self.waiting_goal is None or self.route_paused or
+                self.goal_handle is not None or self.goal_pending):
             return
         if self.enable_query is not None:
             return
@@ -281,6 +354,7 @@ class Operator(Node):
                 if len(values)!=1 or values[0].type!=Parameter.Type.BOOL.value:
                     raise ValueError('enable_control is not a boolean parameter')
                 if not values[0].bool_value:
+                    self.route_started = False
                     p = self.waiting_goal.pose.position
                     self.report(f'Goal queued at ({p.x:.2f}, {p.y:.2f}); motion disabled; enable motion to start Nav2')
                     return
@@ -303,6 +377,8 @@ class Operator(Node):
             self.validate_goal(message)
         except (ValueError,TransformException) as error:
             self.route_paused = True
+            self.route_started = False
+            self.route_pause_reason = 'validation'
             self.report(f'Queued goal rejected on start: {error}; route paused; fix and publish /navigation/resume or cancel route')
             return
         waypoint = self.waypoints.popleft()
@@ -329,6 +405,22 @@ class Operator(Node):
             self.pause_waypoint(waypoint,generation)
             self.report(f'Nav2 goal request failed: {error}')
             return
+
+    def validate_map_goal(self,message):
+        sample = self.grids.get('/map')
+        if sample is None:
+            raise ValueError('/map unavailable; wait for the saved map')
+        grid,_ = sample
+        if (grid.header.frame_id != 'map' or grid.info.resolution <= 0 or
+                not grid.info.width or not grid.info.height or
+                len(grid.data) != grid.info.width*grid.info.height):
+            raise ValueError('/map invalid grid')
+        index = grid_cell(grid,[message.pose.position.x,message.pose.position.y])
+        if index is None:
+            raise ValueError('/map: goal outside grid')
+        value = grid.data[index[1]*grid.info.width+index[0]]
+        if value < 0 or value >= 99:
+            raise ValueError(f'/map: goal cell={index} value={value} is not free')
 
     def validate_goal(self,message):
         tf = self.buffer.lookup_transform('map','base_footprint',Time())
@@ -368,6 +460,8 @@ class Operator(Node):
         if generation == self.goal_generation:
             self.waypoints.appendleft(waypoint)
             self.route_paused = True
+            self.route_started = False
+            self.route_pause_reason = 'navigation'
 
     def goal_response(self,future,goal_pose,waypoint,generation):
         self.goal_pending = False
@@ -376,6 +470,8 @@ class Operator(Node):
             if not handle.accepted:
                 self.pause_waypoint(waypoint,generation)
                 self.report('Nav2 rejected goal; route paused; publish /navigation/resume to retry')
+                if generation != self.goal_generation and self.route_started:
+                    self.check_motion_state()
                 return
             self.goal_handle = handle
             self.last_goal_status = None
@@ -384,10 +480,12 @@ class Operator(Node):
             if generation != self.goal_generation or self.cancel_requested:
                 self.cancel_active_goal()
             elif not self.localized():
-                self.on_cancel(Empty())
+                self.pause_for_localization()
         except Exception as error:
             self.pause_waypoint(waypoint,generation)
             self.report(f'Nav2 goal request failed: {error}')
+            if generation != self.goal_generation and self.route_started:
+                self.check_motion_state()
 
     def goal_error_text(self,goal_pose):
         try:
@@ -419,14 +517,16 @@ class Operator(Node):
             elif status==6:
                 text += ' (ABORTED); no active goal; enabling motion does not retry the failed goal'
             elif status==5:
-                text += ' (CANCELED); route cancelled'
+                text += (' (CANCELED); localization pause; waypoints retained'
+                         if self.route_pause_reason == 'localization' else ' (CANCELED); route cancelled')
             if current and status==4 and not self.waypoints:
+                self.route_started = False
                 text += '; all queued waypoints completed'
             if current and status != 4:
                 text += '; previous goal failed; fix route and send a new goal after cancelling, or publish /navigation/resume to retry; route paused'
             text += self.goal_error_text(goal_pose)
             self.report(text)
-            if current and status == 4:
+            if self.route_started and not self.route_paused:
                 self.check_motion_state()
         except Exception as error:
             self.pause_waypoint(waypoint,generation)

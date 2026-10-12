@@ -89,6 +89,9 @@
         },
         "/point_cloud2": {
           "visible": false
+        },
+        "/navigation/waypoints": {
+          "visible": true
         }
       },
       "layers": {},

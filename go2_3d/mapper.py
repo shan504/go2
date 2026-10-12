@@ -66,6 +66,7 @@ class Mapper(Node):
         self.seeded = False
         self.last_accepted = None
         self.accepted_odom = None
+        self.accepted_match_correction = None
         self.last_tf_stamp = None
         self.initial_hint_used = False
         self.waiting_status_time = 0.0
@@ -164,6 +165,7 @@ class Mapper(Node):
             self.initialized, self.seeded = True, False
             self.last_accepted = None
             self.accepted_odom = None
+            self.accepted_match_correction = None
             self.processed_stamp = None
             self.generation += 1
         self.report('Initial-pose seed received; waiting for accepted GICP match')
@@ -186,6 +188,8 @@ class Mapper(Node):
             localization_points = self.localization_points
             history = list(self.history)
             previous_odom = self.accepted_odom
+            previous_match = (self.accepted_match_correction.copy()
+                              if self.accepted_match_correction is not None else correction)
         try:
             frames = []
             stamp_ns = Time.from_msg(message.header.stamp).nanoseconds
@@ -240,8 +244,11 @@ class Mapper(Node):
                     raise ValueError(f'Fine GICP {result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}')
                 matched,fitness,rmse = result.transform,result.fitness,result.rmse
             new_correction = matched@np.linalg.inv(odom_base)
-            if not static_correction_is_consistent(correction,new_correction,previous_odom,odom_base):
-                jump = np.linalg.inv(guess)@matched
+            # Compare accepted measurements, not the lagging display filter.
+            # A correction accepted while moving may still be settling after
+            # odometry stops; that residual is not a new registration jump.
+            if not static_correction_is_consistent(previous_match,new_correction,previous_odom,odom_base):
+                jump = np.linalg.inv(previous_match@odom_base)@matched
                 raise ValueError(f'Rejected GICP correction jump while odometry stationary: {np.linalg.norm(jump[:3,3]):.3f}m / {np.degrees(rotation_angle(jump)):.2f}deg (limit 0.05m / 2deg)')
             age = (self.get_clock().now()-Time.from_msg(message.header.stamp)).nanoseconds/1e9
             if time.monotonic()-received > self.p['validity_timeout'] or age > self.p['validity_timeout']:
@@ -275,6 +282,7 @@ class Mapper(Node):
                 self.last_accepted = received
                 self.last_failure = ''
                 self.accepted_odom = odom_base.copy()
+                self.accepted_match_correction = new_correction.copy()
                 header = Header(stamp=message.header.stamp,frame_id='map')
                 self.registered_pub.publish(xyz_message(header,new))
             self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}'))
