@@ -222,6 +222,11 @@ Nav2 原生的 `/goal_pose` 订阅在启动组内重映射，避免绕过操作�
 停止或取消会清空路线。定位失效会停车、取消当前action并保留当前点与后续点；
 定位恢复后点“启用运动”继续，不会自动恢复。真实规划/控制失败仍需显式“重试暂停路线”。
 在主题显示中开启 `/navigation/waypoints` 查看全部编号；`/goal_pose`自身仅渲染最新箭头。
+
+点云和TF分别经DDS到达，点云先到时会暂存并重试其原时间戳对应的TF，不直接丢帧。
+仍维持1秒原始数据期限，过期或非法变换不能恢复定位。`/localization/status` 的
+`clouds_received/aligned/tf_waits/expired/pending` 区分收包、对齐、等待和丢弃；
+`processing_time/source_age` 报告配准耗时和该次结果所用点云的原始接收年龄。
 `tools.sh enable/disable` 也通过相同操作节点，支持上述顺序。
 Nav2 action 不可用时，启用与目标操作会拒绝并附上最新启动状态；仅定位有效不足以启动导航。
 启动状态现在分别报告等待定位、TF/时间戳、持续就绪和生命周期管理服务。
