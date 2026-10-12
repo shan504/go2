@@ -56,7 +56,9 @@ class MotionCheck(Node):
         'go2_edu_dds_bridge': ['enable_control', 'allow_motion', 'max_linear_speed', 'max_yaw_speed'],
         'go2_gicp': ['scan_window', 'registration_period', 'validity_timeout',
             'voxel_size', 'localization_voxel_size', 'localization_correspondence',
-            'submap_radius', 'map_voxel_size', 'map_publish_period'],
+            'localization_min_fitness', 'localization_max_rmse',
+            'submap_radius', 'map_voxel_size', 'map_publish_period',
+            'stationary_translation_limit', 'stationary_rotation_limit_degrees'],
     }
 
     def __init__(self):

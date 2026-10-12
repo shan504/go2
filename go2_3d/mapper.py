@@ -32,6 +32,17 @@ def transform_matrix(transform):
     return pose_matrix([t.x,t.y,t.z], [q.x,q.y,q.z,q.w])
 
 
+class ScanMatchUnavailable(ValueError):
+    """Discard this scan without renewing the previous accepted match."""
+
+
+def require_match(result, prefix=''):
+    if not result.accepted:
+        error = (ScanMatchUnavailable if result.reason in
+                 ('too few points', 'overlap/residual rejected') else ValueError)
+        raise error(f'{prefix}{result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}')
+
+
 class Mapper(Node):
     def __init__(self):
         super().__init__('go2_gicp')
@@ -44,7 +55,9 @@ class Mapper(Node):
                         registration_period=0.5, validity_timeout=1.0,
                         correspondence_distance=0.7, min_fitness=0.55, max_rmse=0.20,
                         max_translation=0.6, max_rotation=0.35,
-                        localization_voxel_size=0.05, localization_correspondence=0.20,
+                        localization_voxel_size=0.10, localization_correspondence=0.30,
+                        localization_min_fitness=0.30, localization_max_rmse=0.15,
+                        stationary_translation_limit=0.25, stationary_rotation_limit_degrees=8.0,
                         correction_alpha=0.25,auto_initialize=False,
                         initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
         for name, value in defaults.items():
@@ -54,6 +67,9 @@ class Mapper(Node):
             raise ValueError('correction_alpha must be greater than 0 and at most 1')
         if self.p['mode'] not in ('mapping','localization'):
             raise ValueError('mode must be mapping or localization')
+        for name in ('stationary_translation_limit', 'stationary_rotation_limit_degrees'):
+            if not np.isfinite(self.p[name]) or self.p[name] <= 0:
+                raise ValueError(f'{name} must be finite and positive')
         map_name(self.p['map_name'])
         self.lock = threading.RLock()
         self.generation = 0
@@ -250,20 +266,30 @@ class Mapper(Node):
                               if self.accepted_match_correction is not None else correction)
         try:
             frames = []
+            frame_sources = []
             stamp_ns = Time.from_msg(message.header.stamp).nanoseconds
             inverse_odom = np.linalg.inv(odom_base)
-            for previous,frame_odom,_ in history:
+            for previous,frame_odom,frame_received in history:
                 difference = (stamp_ns-Time.from_msg(previous.header.stamp).nanoseconds)/1e9
                 if 0 <= difference <= self.p['scan_window']:
                     xyz = filter_points(cloud_xyz(previous))
+                    if not len(xyz):
+                        continue
                     # Align scan packets using their own timestamped odometry.
                     # This is not per-return IMU deskew within a scan packet.
                     frames.append(transform_points(xyz,inverse_odom@frame_odom))
+                    frame_sources.append((frame_received,previous.header.stamp))
+            if not frames:
+                raise ScanMatchUnavailable('Too few finite/range-filtered cloud points')
+            # Empty current packets cannot refresh an estimate made solely
+            # from older window geometry. Keep the newest CONTRIBUTING
+            # scan's original receipt/stamp as the freshness source.
+            source_received,source_stamp = max(frame_sources,key=lambda item:item[0])
             input_points = filter_points(np.vstack(frames))
             source = cloud(input_points, self.p['voxel_size'])
             registration_count = len(source.points)
             if len(source.points) < 100:
-                raise ValueError('Too few finite/range-filtered cloud points')
+                raise ScanMatchUnavailable('Too few finite/range-filtered cloud points')
             # Predict from the last accepted measurement, not the lagging
             # output filter. At a waypoint stop a sparse/repeating scan can
             # otherwise chase filter residual into a different ICP basin.
@@ -280,11 +306,12 @@ class Mapper(Node):
                 nearby = points[np.linalg.norm(points-guess[:3,3],axis=1) < self.p['submap_radius']]
                 result = align(source, cloud(nearby, None), guess,
                                correspondence=self.p['correspondence_distance'],
-                               min_fitness=self.p['min_fitness'], max_rmse=self.p['max_rmse'],
+                               min_fitness=(self.p['localization_min_fitness']
+                                            if self.p['mode'] == 'localization' else self.p['min_fitness']),
+                               max_rmse=self.p['max_rmse'],
                                max_translation=self.p['max_translation'] if seeded else 2.0,
                                max_rotation=self.p['max_rotation'] if seeded else 0.8)
-                if not result.accepted:
-                    raise ValueError(f'{result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}')
+                require_match(result)
                 matched, fitness, rmse = result.transform, result.fitness, result.rmse
             else:
                 # Once localized, trust timestamped odometry for the initial
@@ -300,22 +327,27 @@ class Mapper(Node):
                 registration_count = len(fine_source.points)
                 result = align(fine_source,cloud(nearby,None),matched,
                                correspondence=self.p['localization_correspondence'],
-                               min_fitness=self.p['min_fitness'],max_rmse=min(self.p['max_rmse'],0.10),
+                               min_fitness=self.p['localization_min_fitness'],
+                               max_rmse=min(self.p['max_rmse'],self.p['localization_max_rmse']),
                                max_translation=self.p['max_translation'] if seeded else 2.0,
                                max_rotation=self.p['max_rotation'] if seeded else 0.8,
                                iterations=25,innovation_guess=guess)
-                if not result.accepted:
-                    raise ValueError(f'Fine GICP {result.reason}: fitness={result.fitness:.3f} rmse={result.rmse:.3f}')
+                require_match(result, 'Fine GICP ')
                 matched,fitness,rmse = result.transform,result.fitness,result.rmse
             new_correction = matched@np.linalg.inv(odom_base)
             # Compare accepted measurements, not the lagging display filter.
             # A correction accepted while moving may still be settling after
             # odometry stops; that residual is not a new registration jump.
-            if not static_correction_is_consistent(previous_match,new_correction,previous_odom,odom_base):
+            translation_limit,rotation_limit = 0.05,0.035
+            if self.p['mode'] == 'localization':
+                translation_limit = self.p['stationary_translation_limit']
+                rotation_limit = np.deg2rad(self.p['stationary_rotation_limit_degrees'])
+            if not static_correction_is_consistent(previous_match,new_correction,previous_odom,odom_base,
+                                                   translation_limit,rotation_limit):
                 jump = np.linalg.inv(previous_match@odom_base)@matched
-                raise ValueError(f'Rejected GICP correction jump while odometry stationary: {np.linalg.norm(jump[:3,3]):.3f}m / {np.degrees(rotation_angle(jump)):.2f}deg (limit 0.05m / 2deg)')
-            age = (self.get_clock().now()-Time.from_msg(message.header.stamp)).nanoseconds/1e9
-            if time.monotonic()-received > self.p['validity_timeout'] or age > self.p['validity_timeout']:
+                raise ValueError(f'Rejected GICP correction jump while odometry stationary: {np.linalg.norm(jump[:3,3]):.3f}m / {np.degrees(rotation_angle(jump)):.2f}deg (limit {translation_limit:.2f}m / {np.degrees(rotation_limit):.1f}deg)')
+            age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
+            if time.monotonic()-source_received > self.p['validity_timeout'] or age > self.p['validity_timeout']:
                 raise ValueError('Registration result too old; reduce cloud/submap size or processing load')
             with self.lock:
                 if generation != self.generation:
@@ -343,20 +375,30 @@ class Mapper(Node):
                         self.points, self.last_keyframe = combined, matched.copy()
                         self.registration_points = np.asarray(cloud(combined,self.p['voxel_size']).points).copy()
                         self.last_keyframe_time = now
-                self.last_accepted = received
+                self.last_accepted = source_received
                 self.last_failure = ''
                 self.accepted_odom = odom_base.copy()
                 self.accepted_match_correction = new_correction.copy()
                 header = Header(stamp=message.header.stamp,frame_id='map')
                 self.registered_pub.publish(xyz_message(header,new))
-            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}; processing_time={time.monotonic()-started:.3f}s source_age={time.monotonic()-received:.3f}s; {self.cloud_diagnostics()}'))
+            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}; processing_time={time.monotonic()-started:.3f}s source_age={time.monotonic()-source_received:.3f}s; {self.cloud_diagnostics()}'))
         except Exception as error:
             with self.lock:
-                if generation == self.generation:
+                if generation != self.generation:
+                    return
+                # A single poor scan does not destroy a still-fresh accepted
+                # estimate. Keep its original receipt deadline and unchanged
+                # correction/reference; do not claim this scan was accepted.
+                holding = (self.p['mode'] == 'localization' and
+                           isinstance(error, ScanMatchUnavailable) and
+                           self.last_accepted is not None and
+                           0 <= time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
+                if not holding:
                     self.last_accepted = None
-                    self.last_failure = str(error)
+                self.last_failure = str(error)
             self.get_logger().warning(str(error), throttle_duration_sec=2.0)
-            self.status_pub.publish(String(data=f'{error}; {self.cloud_diagnostics()}'))
+            state = 'holding previous match until its original deadline' if holding else 'no fresh accepted match'
+            self.status_pub.publish(String(data=f'{error}; {state}; {self.cloud_diagnostics()}'))
 
     def health(self):
         with self.lock:

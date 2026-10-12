@@ -54,6 +54,9 @@ class Sensors(Node):
         self.create_subscription(String,'/localization/status',lambda m: setattr(self,'localization_status',m.data),1)
         self.create_subscription(PointCloud2,'/registered_cloud',lambda m: setattr(self,'registered',m),qos_profile_sensor_data)
         self.points = room()
+        self.packet_wait = 0.17
+        self.packet_point_limit = None
+        self.sampling = np.random.default_rng(71)
         self.truth, self.odom = np.eye(4),np.eye(4)
         self.stop = threading.Event()
         self.emitter = threading.Thread(target=self.emit,daemon=True)
@@ -68,9 +71,11 @@ class Sensors(Node):
             self.tf.sendTransform(tf)
             time.sleep(0.03)
             points = transform_points(self.points,np.linalg.inv(self.truth))
+            if self.packet_point_limit is not None and len(points)>self.packet_point_limit:
+                points = points[self.sampling.choice(len(points),self.packet_point_limit,replace=False)]
             self.pub.publish(point_cloud2.create_cloud_xyz32(
                 Header(stamp=header.stamp,frame_id='base_link'),points.astype(np.float32).tolist()))
-            self.stop.wait(0.17)
+            self.stop.wait(self.packet_wait)
 
     def correction_matches(self,expected):
         try:
@@ -95,7 +100,16 @@ def phase(directory,mode,dense=False,auto=False):
         # Use the same named-node YAML override as launch_ros; a wildcard
         # CLI -p alone has lower precedence than the named dense YAML.
         single_frame = Path(directory)/'single_frame_localization.yaml'
-        single_frame.write_text('go2_gicp:\n  ros__parameters:\n    scan_window: 0.0\n')
+        # This general frame/TF regression explicitly uses the strict option
+        # to detect small contradictory scans. Patrol defaults and dropout
+        # behavior are exercised separately by localization_patrol_smoke.py.
+        single_frame.write_text('go2_gicp:\n  ros__parameters:\n    scan_window: 0.0\n'
+                                '    stationary_translation_limit: 0.05\n'
+                                '    stationary_rotation_limit_degrees: 2.0\n'
+                                '    localization_voxel_size: 0.05\n'
+                                '    localization_correspondence: 0.20\n'
+                                '    localization_min_fitness: 0.55\n'
+                                '    localization_max_rmse: 0.10\n')
         arguments += ['--params-file',str(single_frame)]
         original_map = (Path(directory)/'latest/map.pcd').read_bytes()
     if auto:

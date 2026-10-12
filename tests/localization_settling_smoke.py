@@ -27,7 +27,10 @@ def main():
         (directory/'metadata.yaml').write_text(yaml.safe_dump(
             dict(ground_model=dict(plane=[0.,0.,1.,0.3]))))
         rclpy.init(args=['--ros-args','-p','mode:=localization','-p',f'map_directory:={tmp}',
-                        '-p','auto_initialize:=true'])
+                        '-p','auto_initialize:=true','-p','stationary_translation_limit:=0.05',
+                        '-p','stationary_rotation_limit_degrees:=2.0',
+                        '-p','localization_voxel_size:=0.05','-p','localization_correspondence:=0.20',
+                        '-p','localization_min_fitness:=0.55','-p','localization_max_rmse:=0.10'])
         mapper,sensors = Mapper(),Sensors()
         sensors.points = points
         executor = MultiThreadedExecutor(num_threads=4)

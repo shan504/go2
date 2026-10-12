@@ -28,11 +28,10 @@ def generate_launch_description():
                        **{key: ParameterValue(LaunchConfiguration(key), value_type=float)
                           for key in ('initial_x', 'initial_y', 'initial_z', 'initial_yaw_degrees')}}]
         if mode.perform(context) != 'mapping':
-            # Dense mapping accumulates packets to enrich the saved PCD. Live
-            # localization must finish before the original 1s source deadline;
-            # use one fresh packet even when loading a map with the dense profile.
-            # The complete PCD, fine GICP resolution and acceptance limits remain.
-            parameters.append({'scan_window': 0.0})
+            # Use the indoor-verified 0.5s accumulation for patrol localization.
+            # Registration downsampling controls CPU cost separately from the
+            # complete saved PCD and from the original 1s freshness deadline.
+            parameters.append({'scan_window': 0.5})
         return [Node(executable='/usr/bin/python3', name='go2_gicp', output='screen',
                      arguments=[str(root/'go2_3d/mapper.py')], parameters=parameters)]
 

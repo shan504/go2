@@ -158,12 +158,14 @@ class GICPTests(unittest.TestCase):
         result = align(cloud(room()+[80,0,0]),target,np.eye(4))
         self.assertFalse(result.accepted)
         self.assertEqual(result.fitness,0)
+        self.assertEqual(result.reason,'overlap/residual rejected')
 
     def test_large_pose_correction_is_rejected(self):
         target = cloud(room())
         moved = cloud(room()-[0.3,0,0])
         result = align(moved,target,np.eye(4),max_translation=0.05)
         self.assertFalse(result.accepted)
+        self.assertEqual(result.reason,'innovation rejected')
 
 
 if __name__ == '__main__':

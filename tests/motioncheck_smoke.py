@@ -186,9 +186,11 @@ class GicpEndpoints(Node):
     def __init__(self):
         super().__init__('go2_gicp')
         values = dict(scan_window=0.5, registration_period=0.5, validity_timeout=1.0,
-                      voxel_size=0.15, localization_voxel_size=0.05,
-                      localization_correspondence=0.2, submap_radius=25.0,
-                      map_voxel_size=0.02, map_publish_period=3.0)
+                      voxel_size=0.15, localization_voxel_size=0.10,
+                      localization_correspondence=0.30, submap_radius=25.0,
+                      localization_min_fitness=0.30, localization_max_rmse=0.15,
+                      map_voxel_size=0.02, map_publish_period=3.0,
+                      stationary_translation_limit=0.25, stationary_rotation_limit_degrees=8.0)
         for name in MotionCheck.PARAMETERS['go2_gicp']:
             self.declare_parameter(name, values[name])
         self.status = self.create_publisher(String, '/localization/status', 10)
@@ -206,7 +208,10 @@ def localization_timeline():
         harness.wait(lambda: 'go2_gicp' in monitor.parameters)
         actual = monitor.parameters['go2_gicp']
         assert actual['scan_window'] == 0.5 and actual['registration_period'] == 0.5
-        assert actual['validity_timeout'] == 1.0 and actual['localization_voxel_size'] == 0.05
+        assert actual['validity_timeout'] == 1.0 and actual['localization_voxel_size'] == 0.10
+        assert actual['stationary_translation_limit'] == 0.25
+        assert actual['stationary_rotation_limit_degrees'] == 8.0
+        assert actual['localization_min_fitness'] == 0.30 and actual['localization_max_rmse'] == 0.15
         subscribers = monitor.get_subscriptions_info_by_topic('/localization/status')
         assert subscribers[0].qos_profile.durability == DurabilityPolicy.VOLATILE
         monitor.arm()

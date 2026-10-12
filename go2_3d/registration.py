@@ -31,12 +31,17 @@ def align(source, target, guess, correspondence=0.7, min_fitness=0.55,
         o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=iterations))
     reference = guess if innovation_guess is None else innovation_guess
     delta = np.linalg.inv(reference) @ result.transformation
-    accepted = (np.isfinite(result.transformation).all() and
-                result.fitness >= min_fitness and result.inlier_rmse <= max_rmse and
-                np.linalg.norm(delta[:3,3]) <= max_translation and
-                rotation_angle(delta) <= max_rotation)
+    finite = np.isfinite(result.transformation).all()
+    innovation_ok = (finite and np.linalg.norm(delta[:3,3]) <= max_translation and
+                     rotation_angle(delta) <= max_rotation)
+    quality_ok = result.fitness >= min_fitness and result.inlier_rmse <= max_rmse
+    accepted = innovation_ok and quality_ok
+    # Distinguish a missing/poor scan from a dangerous pose innovation. Only
+    # the former may hold the previous match until its ORIGINAL deadline.
+    reason = ('nonfinite transform' if not finite else 'innovation rejected' if not innovation_ok
+              else 'overlap/residual rejected' if not quality_ok else 'accepted')
     return Match(accepted, result.transformation, result.fitness, result.inlier_rmse,
-                 'accepted' if accepted else 'overlap/residual/innovation rejected')
+                 reason)
 
 
 def static_correction_is_consistent(previous_correction, correction, previous_odom, odom,
