@@ -58,13 +58,14 @@ bash go2_3d/run.sh mapping
 - 固定/显示参考系均为 `map`，网格 `Z 向上`；配准点云与地图按 `z` 高度着色。
 - 前置相机：`/camera/image/compressed`，替换旧 `/robot0/camera/image_raw`。
 - 发布 `/mapping/save` 保存三维地图和 Nav2 栅格。
-- 设置 `/initialpose`；点选 `/goal_pose` 在运动禁用时暂存，启用确认后转换成 Nav2 `NavigateToPose` action。
+- 设置 `/initialpose`；单击发布 `/navigation/waypoint` 在运动禁用时入队，启用确认后转换成 Nav2 `NavigateToPose` action；兼容旧 `/goal_pose`。
 - 发布 `/control/enable` 启用或停止运动；`/navigation/cancel` 取消导航。
 - 查看 `/localization/status`、`/localization/valid`、`/operator/status`、`/control/status`。
 
 可导入 [预设 Foxglove 导航布局](docs/foxglove_go2_navigation.json)，左 3D 面板用于初始位姿，
-右 3D 面板用于目标点。场景右侧尺子下方的发布工具需要先启用，再依次**单击位置、单击朝向**；
-这不是 RViz 的拖动后松开操作。详见上面的操作说明，布局导入兼容性尚待用户桌面确认。
+右 3D 面板预设 Point 工具、话题 `/navigation/waypoint`，启用工具后**单击位置**即可加入一个航点。
+若工具发布后自动关闭，每个点重新启用工具。左面板的 `/initialpose` 和旧 Pose 目标仍需位置、朝向两次点击。
+详见操作说明；布局导入兼容性和鼠标操作仍须在用户桌面验证。
 
 地图保存到仓库目录的 `maps/library/地图名/时间戳/`，未指定名称时为 `default`。
 每次保存生成新版本，`maps/latest` 和该名称的 `latest` 只在全部保存成功后更新；旧版本保留。
@@ -114,7 +115,7 @@ cd ~/go2_nav && git pull --ff-only && bash go2_3d/tools.sh restart-navigation
 因此已经走离建图起点时不用重新填 `0 0 0`，也不用重建地图或镜像。
 读取失败时保留原容器并明确报错；重启期间保持狗不动，该 SSH 终端持续运行。
 等 `/localization/valid=true` 且 `/navigation/startup_status` 显示 Nav2 启动成功后，
-在 Foxglove **重新选前方约 1～1.5 米的自由目标、单击朝向，再点启用运动**。
+在 Foxglove 用右面板 Point 工具单击前方约 1～1.5 米自由目标，确认 `queued=1` 后再启用运动。
 启动保留的是当前位置，运动仍关闭，旧目标不会自动重发。
 
 旧图需要修复导航投影，先停止正在运行的导航终端，再运行：
@@ -187,9 +188,11 @@ Nav2 使用动态 `base_footprint`：投影到 map 栅格的 XY 平面，保留�
 
 1. 更新后保持狗站稳，在第二个SSH终端执行 `bash go2_3d/tools.sh restart-navigation`，保留当前位置重启。
 2. 确认定位有效、Nav2已启动，运动先保持关闭。在Foxglove目标工具中依次发布多个点；
-   每个点仍需完成“单击位置、单击朝向”这两次点击。每次完成一次发布就是加入一个航点。
+   新布局用 Point、话题 `/navigation/waypoint`，每点单击位置一次即可；旧 Pose `/goal_pose` 仍需位置、朝向两次点击。
+   如果发布工具自动退出，下一个点先重新启用工具。逐点确认 `queued=1`、`queued=2` 和编号；选点之间不点停止或取消。
 3. 点一次“启用运动”。到第一个点确认 `SUCCEEDED` 后自动走第二个，直到队列完成；运行中也可以追加。
-   `/operator/status` 显示 `route current=编号 queued=剩余数 completed=完成数 paused=是否暂停`。
+   `/operator/status` 显示 `route current=编号 queued=剩余数 completed=完成数 paused=是否暂停`，
+   `goal_inputs_received` 是操作节点启动以来收到的目标消息数，`last_input` 是最近的目标输入话题。
 4. 某点失败或下一点变成障碍，保留失败点及后续点并暂停，**不跳过、不自动重试**。
    修复后执行 `bash go2_3d/tools.sh resume`，从失败点重试；运动关闭时仍需另行启用。
    想重新选路线，先取消清空，随后选新点。队列最多100点，存于内存，重启后需重新选择。
@@ -527,7 +530,8 @@ SDK 原配置除25厘米位置容差外，还要求朝向误差≤0.25rad（约1
 yaw容差为π、stateful=false，任何终点朝向都允许；每次仍重新检查当前位置。
 删除DWB末端RotateToGoal阶段，行为树显式指定general_goal_checker。
 目标外的10秒无进展超时保留，实际外形、障碍检查和速度配置不变。
-Foxglove仍需两次单击形成目标消息；第二次的箭头不再要求狗在终点转向对齐。
+新布局的 Point `/navigation/waypoint` 单击即可形成目标消息；旧 Pose `/goal_pose` 仍需两次单击，
+第二次的箭头不要求狗在终点转向对齐。两种输入经过同一定位、TF、代价地图验证和顺序队列。
 
 保持当前容器运行和狗静止，用 `git pull --ff-only` 后的 `tools.sh restart-navigation`
 保留当前位置重启，再重新选目标、启用运动。成功应显示：

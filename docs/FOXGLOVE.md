@@ -15,6 +15,7 @@
 | 图像 | `/camera/image/compressed` |
 | 原始消息 | `/localization/status`、`/localization/valid`、`/operator/status` |
 | 导航路径 | `/plan`、`/local_plan`，仅导航模式 |
+| 航点编号 | `/navigation/waypoints`，绿色待执行、橙色当前、红色暂停 |
 | 二维栅格 | `/map`，按需开启透明度，避免遮住三维点云 |
 | 障碍代价地图 | `/local_costmap/costmap`、`/global_costmap/costmap`，按需开启 |
 
@@ -62,6 +63,13 @@ Foxglove 订阅日志仅证明订阅建立，不证明收到数据。可暂时�
 `base_link`，展开“主题”并开启 `/point_cloud2` 检查数据接收；建图成功后将固定/显示参考系都切回
 `map` 并开启 `/registered_cloud`、`/map_cloud`，让显示保持在世界坐标系中。
 
+### 3D 或相机显示 Error creating WebGL context
+
+先在 Chrome 设置中开启“可用时使用图形加速”，点击重新启动；确认面板可以正常绘制后再选航点。
+若仍报错，可在 Edge 中连接相同数据源检查。需要恢复面板时，重新添加报错面板或导入完整布局，
+然后检查右 3D 面板的显示参考系为 `map`、“发布 / Publish”类型为“点 / Point”、点话题为
+`/navigation/waypoint`。布局重置不会修复浏览器的 WebGL 能力，也不会恢复已清空的机器人路线。
+
 ## 建图与保存
 
 SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用遥控器缓慢走动。
@@ -74,8 +82,8 @@ SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用
 |---|---|---|---|
 | 保存地图 | `/mapping/save` | `std_msgs/msg/Empty` | `{}` |
 | 启用运动 | `/control/enable` | `std_msgs/msg/Bool` | `{"data":true}` |
-| 停止运动 | `/control/enable` | `std_msgs/msg/Bool` | `{"data":false}` |
-| 取消导航 | `/navigation/cancel` | `std_msgs/msg/Empty` | `{}` |
+| 停止运动并清空路线 | `/control/enable` | `std_msgs/msg/Bool` | `{"data":false}` |
+| 取消并清空路线 | `/navigation/cancel` | `std_msgs/msg/Empty` | `{}` |
 
 不同 Foxglove 版本可能把类型显示为 `std_msgs/Empty` 等，选择服务器实际公布的类型即可。
 设置为手动单次发布，避免自动重复保存或重复启用。
@@ -108,7 +116,7 @@ SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用
 `/initialpose` 必须有 `header.frame_id: map` 和有效的四元数，默认空参考系消息会被 GICP 拒绝。
 
 可直接导入 [预设导航布局](foxglove_go2_navigation.json)。它包含两个俯视 3D 面板：
-左面板预设 `/initialpose` 位姿估计，右面板预设 `/goal_pose` 位姿目标；相机、定位状态和
+左面板预设 `/initialpose` 位姿估计，右面板预设 `/navigation/waypoint` 单击航点；相机、定位状态和
 启用/停止/取消按钮同时显示。通过 Foxglove 布局菜单选择“从文件导入 / Import from file”。
 Windows PowerShell 下载文件：
 
@@ -117,7 +125,8 @@ Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/shan504/go2/main/docs/
 ```
 
 导入后连接当前 `ws://192.168.123.18:8765` 数据源；导入本身不会发布消息或启用运动。
-鼠标工具仍需单击启用，再依次点击位置和朝向。布局只减少设置步骤；桌面版本兼容性待用户导入确认。
+鼠标工具仍需单击启用；左面板初始化需要依次点击位置和朝向，右面板航点只需点击位置。
+布局只减少设置步骤；桌面版本兼容性待用户导入确认。
 布局缩小坐标轴并关闭重叠标签以改善可读性，这不会改变 ROS TF 或修复定位误差。
 
 ### 只剩发布按钮、3D 面板不见了
@@ -199,33 +208,53 @@ ros2 lifecycle get --no-daemon /planner_server
 
 ## 导航
 
-确认定位与现场状态后，使用 3D 面板的发布位姿工具选择目标。
-运动禁用时，`/operator/status` 显示 `Goal queued`，此时还没有启动 Nav2 的进展计时。
-再在启用运动面板单次发布 `{"data":true}`；程序确认桥的实际启用参数、重新检查定位/TF/目标格后，
-才发送 Nav2 action。先启用再选目标也可。鼠标操作如下：
+确认定位与现场状态后，使用右 3D 面板的发布点工具选择一个或多个航点。先停止运动一次，
+确认 `/operator/status` 显示 `Motion enable=False; parameter accepted=True` 后再开始选点；
+停止按钮即使在运动已关闭时也会清空路线，选点之间不要再按停止或取消。
 
-- 目标话题 `/goal_pose`，类型 `geometry_msgs/msg/PoseStamped`，参考系 `map`。
-- 在设置的“发布”分组选择“位姿 / Pose”，话题为 `/goal_pose`；或长按场景右侧发布工具选择 **Publish pose**。
-- 再单击工具按钮启用它；在已观察到的空地单击一次，再移动鼠标、单击一次形成箭头并发布。
-  巡检按位置到达：当前距离目标≤30厘米即可，终点不要求对齐这个箭头。
-- 首次选近距离目标，观察 `/plan`、局部障碍和机器人响应。
+1. 显示参考系设为 `map`，在设置的“发布 / Publish”分组选择“点 / Point”，
+   点话题填写 `/navigation/waypoint`，消息类型为 `geometry_msgs/msg/PointStamped`。
+2. 长按场景右侧的发布工具按钮，选择 **Publish point**，再单击工具按钮启用它。
+   在已观察到的空地单击一次，发布一个航点；无需选择终点朝向。
+3. 检查 `/operator/status` 出现 `Waypoint #1 appended` 和 `queued=1`，运动关闭时随后显示
+   `Goal queued`；右面板开启 `/navigation/waypoints` 后应显示绿色编号。
+   若工具发布后退出激活状态，下一个点前再次启用工具，然后单击第二个位置，确认 `queued=2`。
+4. 所有点入队后，在启用运动面板单次发布 `{"data":true}`。程序确认桥的实际启用参数，
+   重新检查定位、TF 和目标格后才发送 Nav2 action；运动关闭时不会启动 Nav2 的进展计时。
+   首次选近距离目标，观察 `/plan`、局部障碍和机器人响应。
 
-新增的 `operator_bridge.py` 把 `/goal_pose` 转换为 `/navigate_to_pose` action。
+“主题 / Topics”中的话题勾选只控制显示，不会发布航点；修改发布类型后也仍需启用鼠标工具。
+巡检按位置到达：当前距离目标≤30厘米即可，终点朝向不限。
+
+旧布局仍可使用 `/goal_pose`，类型 `geometry_msgs/msg/PoseStamped`，参考系同样为 `map`。
+这是 **Pose 两次单击的兼容方式**：在“发布”分组选择“位姿 / Pose”，位姿话题填写 `/goal_pose`，
+选择 **Publish pose** 并启用工具；先单击位置，再移动鼠标、单击朝向，完成一次发布。
+若工具随后退出激活状态，每个点前再次启用。只点一次位置尚未完成 Pose 发布。
+新旧两种输入都追加到同一队列，同一航点选择一种方式发布即可。
+
+`operator_bridge.py` 把 `/navigation/waypoint` 或 `/goal_pose` 转换为 `/navigate_to_pose` action。
 Nav2 原生的 `/goal_pose` 订阅在启动组内重映射，避免绕过操作节点或重复发 action。
-`/operator/status` 应显示 Nav2 接受目标；定位无效、非导航模式或目标参考系错误时会拒绝。
+启用后 `/operator/status` 应显示 Nav2 接受目标；定位无效、非导航模式或目标参考系错误时会拒绝。
 原始地图目标值 100、代价地图目标值 99/100、未知目标和过期代价地图也会明确拒绝，
 信息包含话题、格子和数值。地图中固定目标归一化为最新时间语义和 yaw 姿态。
 规划失败不再自动执行原地 Spin 或 BackUp，避免把恢复动作误认为目标导航。
-有进行中的目标时先取消，等待 action 完成，再选新目标。
-暂存但尚未启动的目标可以重新点选替换；停止、取消或定位丢失会清除暂存目标。
+每次发布都会追加航点，运行中也可追加；当前点真实 `SUCCEEDED` 后才发送下一点。
+想改选整条路线时先取消并等待当前 action 结束，再选新点；停止、取消或定位丢失会清空全部航点。
 `tools.sh enable/disable` 也通过相同操作节点，支持上述顺序。
 Nav2 action 不可用时，启用与目标操作会拒绝并附上最新启动状态；仅定位有效不足以启动导航。
 启动状态现在分别报告等待定位、TF/时间戳、持续就绪和生命周期管理服务。
 
 “启用运动”只是允许运动桥执行 Nav2 的速度命令，不会自己产生前进命令。
+若日志为 `Motion enable=True; parameter accepted=True; no active navigation goal`，并显示
+`current=- queued=0 completed=0 paused=False`，当时没有待执行路线；重复点击启用不会建立路线。
+先停止一次，再添加“原始消息 / Raw Messages”面板查看 `/navigation/waypoint`
+（旧 Pose 工具查看 `/goal_pose`）和 `/operator/status`，完整发布一个点：输入消息未更新时检查
+工具是否启用、话题设置和 WebGL；出现 `Goal rejected` 时按该条原因排查；先入队又清空时查看
+中间的停止、取消或定位丢失消息。先确认 `queued=1`，再增加第二点并确认 `queued=2`，最后启用。
+`enable_control=True; waiting for a new cmd_vel` 是参数设置时的提示，不表示目标已发布或 Nav2 已启动。
 `GridBased failed to generate a valid path` 表示规划失败。
 已收到路径后报 `Failed to make progress` 则需检查速度执行链路；status=6 仅表示 action 已中止，
-不能单凭它判断地图有问题。第二个 SSH 终端先运行 `tools.sh motioncheck 30`，
+不能单凭它判断地图有问题。需要另选新路线时先取消清空旧路线，再在第二个 SSH 终端运行 `tools.sh motioncheck 30`，
 看到 `READY` 后再选择新目标、启用运动；采集覆盖目标开始到失败的整个窗口，
 避免在目标中止后读取到零值而误判。输出同时保存到 `runtime/velocity-debug.txt`。
 它检查真实端点、消息类型/QoS、平滑器生命周期、`/cmd_vel_nav`、`/cmd_vel`、
@@ -320,7 +349,7 @@ Nav2 的 99 表示按机器狗内切半径计算的禁止进入区，100 表示�
 控制器仍按真实外形检查轨迹。诊断会报告目标与最近直接障碍单元的距离，
 以及目标附近最新点云的高度，帮助区分障碍贴近目标和地面误入高度筛选。
 
-取消导航发布 `/navigation/cancel`；停止运动发布 `/control/enable` 为 `false`。
+取消路线发布 `/navigation/cancel`；停止运动发布 `/control/enable` 为 `false`，两者都清空全部航点。
 定位匹配失败或失去传感器数据时，运动桥会发 StopMove，同时请求取消目标。
 软件停止接口需要先在现场验证，遥控器保留在操作人员手中。
 
@@ -337,7 +366,7 @@ cd ~/go2_nav && git pull --ff-only && bash go2_3d/tools.sh restart-navigation
 
 命令禁用运动并清除旧目标，读取当前有效 GICP XYZ/朝向，保留该位置重启导航。
 重启期间不移动狗，也不要重新用 `0 0 0` 初始化已经前进后的位姿。
-确认 `/localization/valid=true` 和 Nav2 启动成功后，重新单击前方1～1.5米自由目标和朝向，
+确认 `/localization/valid=true` 和 Nav2 启动成功后，用右面板 Point 工具单击前方1～1.5米自由目标，
 再点“启用运动”。保留位姿不会保留旧目标或自动启用；读取失败保留原容器并报错。
 
 直行迈步和走到指定目标已有用户现场确认。旧判定还要求约14°朝向精度，
@@ -350,8 +379,9 @@ cd ~/go2_nav && git pull --ff-only && bash go2_3d/tools.sh restart-navigation
 首次运行和 mapping/localization/navigation 模式切换通过 SSH 完成；
 当前没有把远程重启容器接入 Foxglove。你可将上述面板保存到现有 Foxglove 布局供以后使用。
 
-连续多点：运动关闭时依次完整发布多个 `/goal_pose`（每点“位置＋朝向”两次点击），再启用一次。
-现在每次发布都会追加，当前点真实 `SUCCEEDED` 后才发送下一点；运行中可追加。
+连续多点按上面“导航”步骤操作：先关闭运动，再用 Point 工具依次单击发布
+`/navigation/waypoint`；旧 Pose 工具仍需每点“位置＋朝向”两次点击。
+逐点确认队列数量和编号，选点之间不按停止或取消，全部入队后启用一次。
 `/operator/status` 的 `current/queued/completed/paused` 显示执行进度。
 新版布局的 `/navigation/waypoints` 以编号显示待执行绿色、当前橙色、暂停红色航点。
 某点失败会保留该点及尾部并暂停；“重试暂停路线”发布 `/navigation/resume`，或SSH执行
