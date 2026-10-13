@@ -26,10 +26,11 @@ bash go2_3d/run.sh mapping
 新建图、切换历史地图和重启定位/导航都使用当前仓库的公共代码与参数。
 定位参数来自 `go2_3d/gicp.yaml`，转向、速度和到点规则来自
 `go2_3d/motion_profile.py`，小障碍过滤来自 `go2_3d/navigation_filter.yaml`。
+导航栅格分辨率与障碍高度来自 `go2_3d/navigation_grid.yaml`。
 地图中保存的参数是采集记录，不会覆盖当前运行策略。
 
-新保存的地图默认生成 **5 厘米导航栅格**。每次 `run.sh navigation`（包括 `dense`
-及 `restart-navigation`）还会从所选地图的完整 PCD 和已观测自由区域，按当前公共设置生成
+建图保留原有10厘米观测栅格。每次 `run.sh navigation`（包括 `dense`
+及 `restart-navigation`）会从所选地图的完整 PCD 和已观测自由区域，按当前公共设置生成5厘米导航栅格到
 `runtime/navigation_map/`，Nav2 加载该运行栅格；实时障碍过滤使用相同的高度阈值和该图的地面模型。
 粗栅格转细栅格保留已知自由面积，旧版调平图也会恢复保留祖先中的自由区域。
 原始 PCD、地图坐标、历史目录和 `latest` 链接不因启动而改变，无需逐张执行修复或清理命令。

@@ -4,8 +4,7 @@ go2_gicp:
     # Store/display denser XYZ without increasing GICP source resolution.
     map_voxel_size: 0.06
     keyframe_max_interval: 2.0
-    # Shared navigation lattice for every newly saved and loaded map.
-    grid_resolution: 0.05
+    grid_resolution: 0.10
     # map origin is the first body pose. Measure ground height before Nav2.
     floor_z: -0.30
     obstacle_min_height: 0.10

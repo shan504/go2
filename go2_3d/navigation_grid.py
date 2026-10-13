@@ -13,13 +13,13 @@ from map_library import inside, validate_bundle
 
 def current_settings():
     """Saved metadata describes geometry; the checkout supplies current policy."""
-    params = yaml.safe_load(Path(__file__).with_name('gicp.yaml').read_text())['go2_gicp']['ros__parameters']
+    params = yaml.safe_load(Path(__file__).with_suffix('.yaml').read_text())
     values = {name: float(params[name]) for name in
               ('grid_resolution', 'obstacle_min_height', 'obstacle_max_height')}
     if (not all(math.isfinite(value) for value in values.values()) or
             not 0.025 <= values['grid_resolution'] <= 0.20 or
             not 0 <= values['obstacle_min_height'] < values['obstacle_max_height']):
-        raise ValueError('Invalid shared navigation grid/height settings in gicp.yaml')
+        raise ValueError('Invalid shared navigation grid/height settings in navigation_grid.yaml')
     return values
 
 

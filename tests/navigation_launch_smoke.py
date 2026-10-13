@@ -55,7 +55,7 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
             assert values['map_voxel_size'] == (0.02 if profile == 'dense' else 0.06)
             assert values['max_map_points'] == (1000000 if profile == 'dense' else 200000)
             assert values['localization_voxel_size'] == 0.10
-            assert values['grid_resolution'] == 0.05
+            assert values['grid_resolution'] == 0.10
             assert values['localization_correspondence'] == 0.30
             assert values['localization_min_fitness'] == 0.30
             assert values['localization_max_rmse'] == 0.15

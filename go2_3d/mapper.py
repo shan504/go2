@@ -49,7 +49,7 @@ class Mapper(Node):
         defaults = dict(mode='mapping', map_directory='/maps/latest', output_directory='/maps', map_name='default',
                         voxel_size=0.15, map_voxel_size=0.06, keyframe_max_interval=2.0,
                         scan_window=0.0, map_publish_period=2.0,
-                        grid_resolution=0.05, floor_z=-0.30,
+                        grid_resolution=0.10, floor_z=-0.30,
                         obstacle_min_height=0.10, obstacle_max_height=1.5,
                         max_map_points=200000, submap_radius=25.0,
                         registration_period=0.5, validity_timeout=1.0,

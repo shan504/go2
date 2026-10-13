@@ -161,7 +161,15 @@ def phase(directory,mode,dense=False,auto=False):
             assert len(saved.points)>initial_count*1.3,'PCD was coarsened back to registration resolution'
             assert sensors.valid is False,'Mapping must never enable navigation motion'
             import yaml
-            assert yaml.safe_load((Path(directory)/'latest/nav.yaml').read_text())['resolution'] == 0.05
+            assert yaml.safe_load((Path(directory)/'latest/nav.yaml').read_text())['resolution'] == 0.10
+            # Runtime navigation policy must not change the live mapper's
+            # original grid cost, saved PCD or subsequent localization input.
+            from navigation_grid import prepare as prepare_navigation_grid
+            saved_pcd = (Path(directory)/'latest/map.pcd').read_bytes()
+            with tempfile.TemporaryDirectory() as runtime:
+                prepare_navigation_grid(directory, runtime)
+                assert yaml.safe_load((Path(runtime)/'nav.yaml').read_text())['resolution'] == 0.05
+            assert (Path(directory)/'latest/map.pcd').read_bytes() == saved_pcd
             if dense:
                 metadata = yaml.safe_load((Path(directory)/'latest/metadata.yaml').read_text())
                 np.testing.assert_allclose(metadata['ground_model']['plane'][:3],[0,0,1],atol=0.02,

@@ -1,0 +1,5 @@
+# Runtime navigation policy for every saved map. Keep this independent of the
+# mapper's original observation lattice and its live processing cost.
+grid_resolution: 0.05
+obstacle_min_height: 0.10
+obstacle_max_height: 1.5
