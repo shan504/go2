@@ -77,7 +77,7 @@ def main(mode='mapping'):
         default_nav_to_pose_bt_xml='/opt/go2_project/go2_3d/navigate.xml')
     nav['behavior_server']['ros__parameters']['robot_base_frame'] = 'base_footprint'
     (output/'nav2_3d.yaml').write_text(yaml.safe_dump(nav,sort_keys=False))
-    if mode == 'navigation':
+    if mode in ('localization', 'navigation'):
         prepare_navigation_grid('/maps', '/runtime/navigation_map')
 
 

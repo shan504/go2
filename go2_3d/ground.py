@@ -4,6 +4,10 @@ import numpy as np
 
 def estimate_ground(points, expected_z=-0.30):
     import open3d as o3d
+    # A legacy map without saved geometry must resolve to the same frame on
+    # repeated loads, rather than choosing a new RANSAC plane each startup.
+    if hasattr(o3d.utility, 'random'):
+        o3d.utility.random.seed(42)
     points = np.asarray(points)
     # Fit near the first body/map origin, below the standing body. Do not let
     # an arbitrary tabletop or ceiling become ground merely by being largest.
@@ -70,6 +74,22 @@ def level_transform(model):
     transform[:3,:3] = np.eye(3)+skew+skew@skew/(1+n[2])
     transform[2,3] = plane[3]
     return transform
+
+
+def ground_alignment(points, model, body_height=None):
+    """Shared validated ground frame and standing height for every map bundle."""
+    points = np.asarray(points)
+    transform = level_transform(model)
+    support = points[(np.abs(heights(points,model))<=0.035)&
+                     (np.linalg.norm(points[:,:2],axis=1)<3.0)]
+    area = len(np.unique(np.floor(support[:,:2]/0.2).astype(int),axis=0))*0.04
+    if len(support)<150 or area<1.0 or np.min(np.ptp(support[:,:2],axis=0))<0.8:
+        raise ValueError('Saved ground lacks broad observed support; original retained')
+    body_height = float(transform[2,3]) if body_height is None else float(body_height)
+    if not np.isfinite(body_height) or not 0.1 < body_height < 1.0:
+        raise ValueError('Cannot infer standing body height; original retained')
+    aligned = dict(model, plane=[0.,0.,1.,0.], height_at_origin=0.)
+    return transform, aligned, body_height
 
 
 def body_seed_position(position, model=None, body_height=None):

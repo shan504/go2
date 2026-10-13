@@ -28,7 +28,7 @@ def export(project):
         path = runtime/'config'/name
         if path.is_file():
             entries.append((path,'config/'+name))
-    for name in ('nav.pgm', 'nav.yaml', 'metadata.yaml', 'observed_free.npz'):
+    for name in ('map.pcd', 'nav.pgm', 'nav.yaml', 'metadata.yaml', 'observed_free.npz'):
         path = runtime/'navigation_map'/name
         if path.is_file():
             entries.append((path,'navigation_map/'+name))

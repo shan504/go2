@@ -50,6 +50,7 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
                 else:
                     values.update(value)
             assert values['mode'] == ('mapping' if mode == 'mapping' else 'localization')
+            assert values['map_directory'] == '/runtime/navigation_map'
             expected_window = 0.0 if mode == 'mapping' and profile == 'standard' else 0.5
             assert values.get('scan_window', 0.0) == expected_window, (mode, profile, values)
             assert values['map_voxel_size'] == (0.02 if profile == 'dense' else 0.06)

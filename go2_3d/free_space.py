@@ -80,11 +80,11 @@ def resample_free(source, ground, transform, resolution, max_cells=4_000_000,
     return result
 
 
-def restore_ancestor_free(root, metadata, grid):
+def restore_ancestor_free(root, metadata, grid, target_from_map=None):
     """Restore coarse known areas for maps made by the centre-only converter."""
     root = Path(root).resolve()
     current = metadata
-    transform = np.eye(4)
+    transform = np.eye(4) if target_from_map is None else np.asarray(target_from_map,dtype=float).copy()
     visited = set()
     restored = set()
     while current.get('ground_aligned') and current.get('leveled_from'):

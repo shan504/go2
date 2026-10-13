@@ -23,6 +23,7 @@ def generate_launch_description():
     def mapper_node(context):
         parameters = [str(root/'go2_3d/gicp.yaml'), LaunchConfiguration('gicp_params'),
                       {'mode': mapper_mode,
+                       'map_directory':'/runtime/navigation_map',
                        'map_name': ParameterValue(LaunchConfiguration('map_name'), value_type=str),
                        'auto_initialize': ParameterValue(LaunchConfiguration('auto_initialize'), value_type=bool),
                        **{key: ParameterValue(LaunchConfiguration(key), value_type=float)

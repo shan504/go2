@@ -4,6 +4,10 @@ import json
 import math
 import sys
 import time
+from pathlib import Path
+import yaml
+from geometry import pose_matrix
+from ground import level_transform
 
 import rclpy
 from rclpy.node import Node
@@ -39,9 +43,17 @@ def main():
             values = (position.x, position.y, position.z, rotation.x, rotation.y, rotation.z, rotation.w)
             if not all(math.isfinite(value) for value in values):
                 continue
-            yaw = math.degrees(math.atan2(2*(rotation.w*rotation.z+rotation.x*rotation.y),
-                                         1-2*(rotation.y**2+rotation.z**2)))
-            print(json.dumps(dict(x=position.x, y=position.y, z=position.z,
+            body = pose_matrix(values[:3], values[3:])
+            # Old running navigation may still use a body-origin map. Convert
+            # its retained pose to the same ground frame the next load uses.
+            for path in (Path('/runtime/navigation_map/metadata.yaml'), Path('/maps/latest/metadata.yaml')):
+                if path.is_file():
+                    metadata = yaml.safe_load(path.read_text())
+                    if metadata.get('ground_model'):
+                        body = level_transform(metadata['ground_model'])@body
+                    break
+            yaw = math.degrees(math.atan2(body[1,0], body[0,0]))
+            print(json.dumps(dict(x=float(body[0,3]), y=float(body[1,3]), z=float(body[2,3]),
                                   yaw_degrees=yaw, captured_at=time.time())), flush=True)
             return 0
         print('Cannot retain pose: fresh valid GICP localization and map -> base_link TF required. '

@@ -8,7 +8,7 @@ import numpy as np
 import open3d as o3d
 import yaml
 from geometry import ObservedGrid
-from ground import estimate_ground,heights,level_transform
+from ground import estimate_ground,ground_alignment
 from repair_map import grid_stats,repair
 from free_space import resample_free
 from denoise import clean_directory
@@ -34,14 +34,8 @@ def level(root, resolution=0.05):
         raise ValueError('Missing/nonfinite 3D map; original retained')
     params = copy.deepcopy(metadata['parameters'])
     ground = metadata.get('ground_model') or estimate_ground(points,params.get('floor_z',-0.3))
-    transform = level_transform(ground)
-    support = points[(np.abs(heights(points,ground))<=0.035)&(np.linalg.norm(points[:,:2],axis=1)<3.0)]
-    area = len(np.unique(np.floor(support[:,:2]/0.2).astype(int),axis=0))*0.04
-    if len(support)<150 or area<1.0 or np.min(np.ptp(support[:,:2],axis=0))<0.8:
-        raise ValueError('Saved ground lacks broad observed support; original retained')
-    body_height = metadata.get('body_height_above_ground',float(transform[2,3]))
-    if not 0.1 < body_height < 1.0:
-        raise ValueError('Cannot infer standing body height; original retained')
+    transform, model, body_height = ground_alignment(
+        points, ground, metadata.get('body_height_above_ground'))
     grid = ObservedGrid(resolution)
     grid.free = resample_free(source,ground,transform,resolution,grid.max_cells)
     destination = new_directory(root,source_name(root,source),'leveled-')
@@ -49,8 +43,6 @@ def level(root, resolution=0.05):
     try:
         pc.transform(transform)
         leveled = np.asarray(pc.points)
-        model = copy.deepcopy(ground)
-        model.update(plane=[0.,0.,1.,0.],height_at_origin=0.)
         grid.export(leveled,destination,0.,params.get('obstacle_min_height',0.10),
                     params.get('obstacle_max_height',1.5),model)
         denoise_report = clean_directory(destination)

@@ -15,7 +15,9 @@ from level_map import level
 from free_space import resample_free
 from export_map import export
 from test_free_space import sparse_corridor, reaches, old_centres
-from test_ground import pixel
+from test_ground import pixel, tilted_room
+from ground import estimate_ground, heights, body_seed_position, level_transform
+from geometry import ObservedGrid, transform_points, pose_matrix
 
 
 class SharedNavigationGridTests(unittest.TestCase):
@@ -46,7 +48,14 @@ class SharedNavigationGridTests(unittest.TestCase):
                 source_metadata = yaml.safe_load((selected/'metadata.yaml').read_text())
                 self.assertEqual(nav['resolution'], 0.05)
                 self.assertEqual(runtime['source_map'], str(selected))
-                self.assertEqual(runtime['ground_model'], source_metadata['ground_model'])
+                self.assertEqual(runtime['source_ground_model'], source_metadata['ground_model'])
+                self.assertEqual(runtime['ground_model']['plane'], [0.,0.,1.,0.])
+                self.assertAlmostEqual(runtime['body_height_above_ground'], 0.4)
+                original_points = np.asarray(o3d.io.read_point_cloud(str(selected/'map.pcd')).points)
+                loaded_points = np.asarray(o3d.io.read_point_cloud(str(output/'map.pcd')).points)
+                self.assertEqual(len(loaded_points), len(original_points))
+                np.testing.assert_allclose(loaded_points, transform_points(
+                    original_points, np.asarray(runtime['map_from_source_map'])), atol=2e-6)
                 for key, value in current_settings().items():
                     self.assertEqual(runtime['parameters'][key], value)
                 self.assertEqual((root/'latest').resolve(), selected)
@@ -89,7 +98,8 @@ class SharedNavigationGridTests(unittest.TestCase):
             before = fingerprints(source)
             prepare(root, output)
             runtime = yaml.safe_load((output/'metadata.yaml').read_text())
-            self.assertAlmostEqual(runtime['ground_model']['height_at_origin'], -0.4, delta=0.01)
+            self.assertEqual(runtime['ground_model']['height_at_origin'], 0.)
+            self.assertAlmostEqual(runtime['body_height_above_ground'], 0.4, delta=0.01)
             self.assertEqual(fingerprints(source), before)
             self.assertEqual((root/'latest').resolve(), source)
             self.assertFalse((root/'library').exists())
@@ -144,6 +154,69 @@ class SharedNavigationGridTests(unittest.TestCase):
             cells = resample_free(source, dict(plane=[0., 0., 1., 0.4]),
                                   np.eye(4), 0.05, allow_coarser=True)
             self.assertEqual(cells, {(0, 0), (1, 1)})
+
+    def test_tilted_map_pcd_floor_grid_and_body_seed_share_one_frame_on_every_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, output = Path(tmp)/'maps', Path(tmp)/'runtime'
+            source = root/'original'; source.mkdir(parents=True)
+            points = tilted_room()
+            model = estimate_ground(points)
+            pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+            o3d.io.write_point_cloud(str(source/'map.pcd'), pc, compressed=True)
+            grid = ObservedGrid(0.1); grid.free.add((0,0))
+            grid.export(points, source, ground_model=model)
+            (source/'metadata.yaml').write_text(yaml.safe_dump(dict(
+                ground_model=model, parameters=dict(floor_z=-0.3, grid_resolution=0.1))))
+            (root/'latest').symlink_to(source.name)
+            before = fingerprints(source)
+            prepare(root, output)
+            metadata = yaml.safe_load((output/'metadata.yaml').read_text())
+            loaded = np.asarray(o3d.io.read_point_cloud(str(output/'map.pcd')).points)
+            original = np.asarray(o3d.io.read_point_cloud(str(source/'map.pcd')).points)
+            self.assertEqual(len(loaded), len(original), 'Ground alignment erased 3D points')
+            floor = np.abs(heights(original, model)) < 0.02
+            self.assertLess(np.max(np.abs(loaded[floor,2])), 0.021)
+            indices = np.arange(0, len(original)-1, 11)
+            np.testing.assert_allclose(np.linalg.norm(loaded[indices]-loaded[indices+1], axis=1),
+                                       np.linalg.norm(original[indices]-original[indices+1], axis=1), atol=3e-6)
+            seed = body_seed_position([0.,0.,0.], metadata['ground_model'], metadata['body_height_above_ground'])
+            self.assertGreater(seed[2], 0.4)
+            self.assertEqual(metadata['parameters']['floor_z'], 0.)
+            self.assertEqual(yaml.safe_load((output/'nav.yaml').read_text())['origin'][2], 0.)
+            first = fingerprints(output)
+            prepare(root, output)
+            self.assertEqual(fingerprints(output), first, 'Repeated load changed map coordinates')
+            self.assertEqual(fingerprints(source), before)
+            # A saved aligned bundle must be byte-preserved when loaded again.
+            aligned = root/'aligned'; aligned.mkdir()
+            import shutil
+            for path in output.iterdir():
+                shutil.copy2(path, aligned/path.name)
+            (root/'latest').unlink(); (root/'latest').symlink_to(aligned.name)
+            prepare(root, output)
+            self.assertEqual((output/'map.pcd').read_bytes(), (aligned/'map.pcd').read_bytes())
+            self.assertEqual(yaml.safe_load((output/'metadata.yaml').read_text())['body_height_above_ground'], seed[2])
+
+    def test_failed_pcd_alignment_does_not_replace_previous_runtime_or_selected_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, output = Path(tmp)/'maps', Path(tmp)/'runtime'
+            root.mkdir(); source = sparse_corridor(root)
+            prepare(root, output)
+            previous, original = fingerprints(output), fingerprints(source)
+            with patch('open3d.io.write_point_cloud', return_value=False):
+                with self.assertRaises(RuntimeError):
+                    prepare(root, output)
+            self.assertEqual(fingerprints(output), previous)
+            self.assertEqual(fingerprints(source), original)
+            self.assertEqual((root/'latest').resolve(), source)
+
+    def test_retained_pose_converts_old_height_once_and_preserves_aligned_height(self):
+        pose = pose_matrix([0.423, 0.025, 0.04], [0.,0.,np.sin(0.3/2),np.cos(0.3/2)])
+        raw = dict(plane=[0.,0.,1.,0.4])
+        aligned = dict(plane=[0.,0.,1.,0.])
+        converted = level_transform(raw)@pose
+        np.testing.assert_allclose(converted[:3,3], [0.423, 0.025, 0.44])
+        np.testing.assert_allclose(level_transform(aligned)@converted, converted)
 
 
 if __name__ == '__main__':

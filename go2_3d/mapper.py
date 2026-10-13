@@ -25,6 +25,7 @@ from registration import cloud, align, static_correction_is_consistent, blend_co
 from ros_cloud import xyz_message
 from ground import estimate_ground,body_seed_position
 from denoise import clean_directory
+from navigation_grid import build_bundle
 
 
 def transform_matrix(transform):
@@ -500,8 +501,12 @@ class Mapper(Node):
             (directory/'metadata.yaml').write_text(yaml.safe_dump(dict(frame_id='map',parameters=self.p,
                 ground_model=ground,navigation_denoise=denoise_report,
                 map_type='incremental GICP scan-to-map; no loop closure',point_count=len(points))))
-            publish(root,directory)
-            response.success, response.message = True, str(directory)
+            # Raw observations remain as a retained version. Publish only
+            # the complete shared-coordinate bundle used by every map load.
+            aligned = new_directory(root,map_name(self.p['map_name']),'leveled-')
+            build_bundle(root,directory,aligned)
+            publish(root,aligned)
+            response.success, response.message = True, str(aligned)
         except Exception as error:
             response.success, response.message = False, f'{error}; partial files, if any: {directory}'
         return response
