@@ -44,13 +44,21 @@ def align(source, target, guess, correspondence=0.7, min_fitness=0.55,
                  reason)
 
 
+def odometry_is_stationary(previous_odom, odom, translation_limit=0.02, rotation_limit=0.02):
+    """Check body motion between timestamped odometry poses."""
+    if previous_odom is None:
+        return False
+    movement = np.linalg.inv(previous_odom)@odom
+    return (np.linalg.norm(movement[:3,3]) < translation_limit and
+            rotation_angle(movement) < rotation_limit)
+
+
 def static_correction_is_consistent(previous_correction, correction, previous_odom, odom,
                                     translation_limit=0.05, rotation_limit=0.035):
     """Reject false scan matches which move the map while odometry is stationary."""
     if previous_odom is None:
         return True  # Bootstrap and an explicit initialpose may establish a new pose.
-    movement = np.linalg.inv(previous_odom)@odom
-    stationary = np.linalg.norm(movement[:3,3]) < 0.02 and rotation_angle(movement) < 0.02
+    stationary = odometry_is_stationary(previous_odom, odom)
     # Compare the robot pose, not the odometry origin. A small rotation around
     # a distant robot can change the correction's translation by metres.
     change = np.linalg.inv(previous_correction@odom)@(correction@odom)

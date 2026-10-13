@@ -21,7 +21,7 @@ from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
 from tf2_ros import Buffer, TransformListener, TransformBroadcaster, TransformException
 from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
                       cloud_xyz, filter_points, rotation_angle, ObservedGrid, planar_pose, first_map_pose)
-from registration import cloud, align, static_correction_is_consistent, blend_correction
+from registration import cloud, align, static_correction_is_consistent, blend_correction, odometry_is_stationary
 from ros_cloud import xyz_message
 from ground import estimate_ground,body_seed_position
 from denoise import clean_directory
@@ -293,8 +293,8 @@ class Mapper(Node):
             # Predict from the last accepted measurement, not the lagging
             # output filter. At a waypoint stop a sparse/repeating scan can
             # otherwise chase filter residual into a different ICP basin.
-            # Keep the filtered correction for TF/output only; bootstrap and
-            # mapping still use their original initialization/prediction.
+            # Keep the filtered correction for localization TF/output only.
+            # Mapping predicts from its established coordinate anchor.
             prediction = previous_match if self.p['mode'] == 'localization' and seeded else correction
             guess = prediction @ odom_base
             if not len(points) and self.p['mode'] == 'mapping':
@@ -304,7 +304,8 @@ class Mapper(Node):
                 matched, fitness, rmse = first_map_pose(odom_base), 1.0, 0.0
             elif self.p['mode'] == 'mapping' or not seeded:
                 nearby = points[np.linalg.norm(points-guess[:3,3],axis=1) < self.p['submap_radius']]
-                result = align(source, cloud(nearby, None), guess,
+                target = cloud(nearby, None)
+                result = align(source, target, guess,
                                correspondence=self.p['correspondence_distance'],
                                min_fitness=(self.p['localization_min_fitness']
                                             if self.p['mode'] == 'localization' else self.p['min_fitness']),
@@ -335,17 +336,33 @@ class Mapper(Node):
                 require_match(result, 'Fine GICP ')
                 matched,fitness,rmse = result.transform,result.fitness,result.rmse
             new_correction = matched@np.linalg.inv(odom_base)
-            # Compare accepted measurements, not the lagging display filter.
-            # A correction accepted while moving may still be settling after
-            # odometry stops; that residual is not a new registration jump.
+            # A standing robot's accepted scan-to-map noise must not move
+            # the mapping coordinate anchor on every frame. Use a stricter
+            # 2mm/0.002rad odometry check than the existing jump guard; real
+            # odometry motion still passes through unchanged.
+            hold_mapping_anchor = (self.p['mode'] == 'mapping' and seeded and
+                                   odometry_is_stationary(previous_odom, odom_base, 0.002, 0.002))
+            # Localization compares raw accepted measurements, independent
+            # of display-filter lag. Stationary mapping compares its held
+            # anchor so small successive corrections cannot drift away.
             translation_limit,rotation_limit = 0.05,0.035
             if self.p['mode'] == 'localization':
                 translation_limit = self.p['stationary_translation_limit']
                 rotation_limit = np.deg2rad(self.p['stationary_rotation_limit_degrees'])
-            if not static_correction_is_consistent(previous_match,new_correction,previous_odom,odom_base,
+            reference = correction if hold_mapping_anchor else previous_match
+            if not static_correction_is_consistent(reference,new_correction,previous_odom,odom_base,
                                                    translation_limit,rotation_limit):
-                jump = np.linalg.inv(previous_match@odom_base)@matched
+                jump = np.linalg.inv(reference@odom_base)@matched
                 raise ValueError(f'Rejected GICP correction jump while odometry stationary: {np.linalg.norm(jump[:3,3]):.3f}m / {np.degrees(rotation_angle(jump)):.2f}deg (limit {translation_limit:.2f}m / {np.degrees(rotation_limit):.1f}deg)')
+            if hold_mapping_anchor:
+                # Validate the pose actually used for accumulation as well
+                # as the raw GICP solution; holding a frame cannot turn a
+                # low-quality scan into a fresh accepted map update.
+                held = o3d.pipelines.registration.evaluate_registration(
+                    source, target, self.p['correspondence_distance'], correction@odom_base)
+                if held.fitness < self.p['min_fitness'] or held.inlier_rmse > self.p['max_rmse']:
+                    raise ScanMatchUnavailable('Stationary mapping anchor overlap/residual rejected')
+                fitness, rmse = held.fitness, held.inlier_rmse
             age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
             if time.monotonic()-source_received > self.p['validity_timeout'] or age > self.p['validity_timeout']:
                 raise ValueError('Registration result too old; reduce cloud/submap size or processing load')
@@ -355,8 +372,11 @@ class Mapper(Node):
                 # Never filter a rejected match. Bootstrap/reseed snaps only
                 # after GICP acceptance; later correction noise is damped while
                 # odom->base_link retains the full measured robot motion.
-                self.correction = (blend_correction(correction,new_correction,self.p['correction_alpha'],odom_base)
-                                   if self.p['mode'] == 'localization' and seeded else new_correction)
+                if hold_mapping_anchor:
+                    self.correction = correction
+                else:
+                    self.correction = (blend_correction(correction,new_correction,self.p['correction_alpha'],odom_base)
+                                       if self.p['mode'] == 'localization' and seeded else new_correction)
                 matched = self.correction@odom_base
                 self.seeded = True
                 # Registration stays coarse for ARM CPU cost. Retain original
@@ -381,7 +401,7 @@ class Mapper(Node):
                 self.accepted_match_correction = new_correction.copy()
                 header = Header(stamp=message.header.stamp,frame_id='map')
                 self.registered_pub.publish(xyz_message(header,new))
-            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}; processing_time={time.monotonic()-started:.3f}s source_age={time.monotonic()-source_received:.3f}s; {self.cloud_diagnostics()}'))
+            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}; mapping_anchor={"held" if hold_mapping_anchor else "updated" if self.p["mode"] == "mapping" else "n/a"}; processing_time={time.monotonic()-started:.3f}s source_age={time.monotonic()-source_received:.3f}s; {self.cloud_diagnostics()}'))
         except Exception as error:
             with self.lock:
                 if generation != self.generation:
