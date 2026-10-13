@@ -27,7 +27,7 @@ PY
 fi
 gicp_params=/opt/go2_project/go2_3d/gicp.yaml
 [[ "$profile" == dense ]] && gicp_params=/opt/go2_project/go2_3d/gicp_dense.yaml
-dds_file="$HOME/cyclonedds_ws/cyclonedds.xml"
+dds_file="${GO2_DDS_FILE:-$HOME/cyclonedds_ws/cyclonedds.xml}"
 test -f "$dds_file" || { echo "Missing $dds_file" >&2; exit 1; }
 if [[ "$mode" != mapping ]]; then
   for name in map.pcd nav.yaml metadata.yaml; do
@@ -39,13 +39,15 @@ sudo docker image inspect go2-3d:edu >/dev/null
 if [[ "$mode" == navigation ]]; then
   sudo docker run --rm --network none --entrypoint /bin/bash \
     -v "$project_dir/maps:/maps:ro" -v "$project_dir:/opt/go2_project:ro" go2-3d:edu -c \
-    'source /opt/ros/humble/setup.bash && python3 /opt/go2_project/go2_3d/check_nav2_plugins.py && python3 -c '\''import yaml; assert "ground_model" in yaml.safe_load(open("/maps/latest/metadata.yaml")), "Legacy navigation grid: run tools.sh repair-map before navigation"'\'''
+    'source /opt/ros/humble/setup.bash && python3 /opt/go2_project/go2_3d/check_nav2_plugins.py'
 fi
 # Validate dependencies, SDK assets and generated copies before stopping sensors.
 sudo docker run --rm --network none --entrypoint /bin/bash \
+  -e OMP_NUM_THREADS=2 -e OPENBLAS_NUM_THREADS=1 \
   -v "$project_dir:/opt/go2_project:ro" -v "$project_dir/runtime:/runtime:rw" \
+  -v "$project_dir/maps:/maps:ro" \
   go2-3d:edu -c \
-  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && python3 /opt/go2_project/go2_3d/prepare.py'
+  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && python3 /opt/go2_project/go2_3d/prepare.py --mode "$1"' bash "$mode"
 # Our own run uses --rm; a stopped stale container can be removed safely only if
 # it was created by this launcher and has the matching label.
 if sudo docker container inspect go2-3d >/dev/null 2>&1; then

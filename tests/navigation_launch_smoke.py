@@ -55,6 +55,7 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
             assert values['map_voxel_size'] == (0.02 if profile == 'dense' else 0.06)
             assert values['max_map_points'] == (1000000 if profile == 'dense' else 200000)
             assert values['localization_voxel_size'] == 0.10
+            assert values['grid_resolution'] == 0.05
             assert values['localization_correspondence'] == 0.30
             assert values['localization_min_fitness'] == 0.30
             assert values['localization_max_rmse'] == 0.15
@@ -92,6 +93,14 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
                        if isinstance(action, IncludeLaunchDescription)
                        and isinstance(action.launch_description_source, PythonLaunchDescriptionSource))
         if mode == 'navigation':
+            from launch_ros.actions import Node
+            map_server = next(action for action in description.entities
+                              if isinstance(action, Node) and action._Node__node_name == 'map_server')
+            parameters = evaluate_parameters(context, map_server._Node__parameters)
+            assert parameters[-1]['yaml_filename'] == '/runtime/navigation_map/nav.yaml'
+            obstacle_filter = next(action for action in description.entities
+                                   if isinstance(action, Node) and action._Node__node_name == 'go2_ground_obstacles')
+            assert evaluate_parameters(context, obstacle_filter._Node__parameters)[-1]['map_directory'] == '/runtime/navigation_map'
             remap = next(action for action in group.get_sub_entities() if isinstance(action,SetRemap))
             remap.execute(context)
             assert ('goal_pose','/navigation/nav2_direct_goal_unused') in context.launch_configurations['ros_remaps']

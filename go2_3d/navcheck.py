@@ -219,7 +219,7 @@ class NavCheck(Node):
                 lines.append(f'Latest body-cloud packet near goal XY (radius 0.25m): points={len(nearby)}')
                 if len(nearby):
                     lines.append(f'  body-frame z min/median/max={np.round(np.quantile(nearby[:,2],[0,0.5,1]),3).tolist()}m')
-                    metadata_path = Path('/maps/latest/metadata.yaml')
+                    metadata_path = Path('/runtime/navigation_map/metadata.yaml')
                     metadata = yaml.safe_load(metadata_path.read_text()) if metadata_path.exists() else {}
                     if 'ground_model' in metadata:
                         body_from_map = pose_matrix([t.x,t.y,t.z],[q.x,q.y,q.z,q.w])
@@ -228,7 +228,7 @@ class NavCheck(Node):
                         selected = (h>=p['obstacle_min_height'])&(h<=p['obstacle_max_height'])
                         lines.append(f'  ground-relative height min/median/max={np.round(np.quantile(h,[0,0.5,1]),3).tolist()}m; obstacle points={np.count_nonzero(selected)}')
                     else:
-                        lines.append('  Legacy map lacks a ground model; run tools.sh repair-map before navigation')
+                        lines.append('  Runtime navigation ground model unavailable; restart with run.sh navigation to prepare the selected map')
             except (TransformException,ValueError) as error:
                 lines.append(f'  body-cloud goal height check unavailable: {error}')
         return '\n'.join(lines)

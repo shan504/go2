@@ -15,6 +15,7 @@ from tf2_ros import Buffer,TransformListener,TransformException
 from geometry import cloud_xyz,pose_matrix,transform_points
 from ground import heights
 from ros_cloud import xyz_message
+from navigation_grid import current_settings
 
 
 class ObstacleCloud(Node):
@@ -23,7 +24,7 @@ class ObstacleCloud(Node):
         self.declare_parameter('map_directory','/maps/latest')
         metadata = yaml.safe_load((Path(self.get_parameter('map_directory').value)/'metadata.yaml').read_text())
         self.model = metadata['ground_model']
-        p = metadata['parameters']
+        p = current_settings()
         self.min_height,self.max_height = p['obstacle_min_height'],p['obstacle_max_height']
         self.valid,self.valid_received = False,None
         self.pending = deque(maxlen=20)

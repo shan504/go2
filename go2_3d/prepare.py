@@ -8,11 +8,13 @@ from ament_index_python.packages import get_package_share_directory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from denoise import settings
 from motion_profile import configure_navigation
+from navigation_grid import current_settings, prepare as prepare_navigation_grid
 sys.path.insert(0, '/opt/go2_project/patches/dds')
 from prepare import prepare as legacy_prepare
 
 
-def main():
+def main(mode='mapping'):
+    policy = current_settings()
     output = Path('/runtime/config')
     legacy_prepare(Path(get_package_share_directory('go2_robot_sdk')), output)
     # The SDK attaches base_footprint rigidly to the tilting body. Replace only
@@ -40,7 +42,7 @@ def main():
         params['robot_base_frame'] = 'base_footprint'
         params['global_frame'] = 'map' if key == 'global_costmap' else 'odom'
         params['transform_tolerance'] = 0.6
-        params['resolution'] = 0.05
+        params['resolution'] = policy['grid_resolution']
         params['footprint_padding'] = 0.01
         params['always_send_full_costmap'] = True
         if key == 'local_costmap':
@@ -75,7 +77,12 @@ def main():
         default_nav_to_pose_bt_xml='/opt/go2_project/go2_3d/navigate.xml')
     nav['behavior_server']['ros__parameters']['robot_base_frame'] = 'base_footprint'
     (output/'nav2_3d.yaml').write_text(yaml.safe_dump(nav,sort_keys=False))
+    if mode == 'navigation':
+        prepare_navigation_grid('/maps', '/runtime/navigation_map')
 
 
 if __name__ == '__main__':
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--mode', choices=('mapping', 'localization', 'navigation'), default='mapping')
+    main(parser.parse_args().mode)

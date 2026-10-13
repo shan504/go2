@@ -160,8 +160,9 @@ def phase(directory,mode,dense=False,auto=False):
             assert (Path(directory)/'library/indoor/latest').resolve() == (Path(directory)/'latest').resolve()
             assert len(saved.points)>initial_count*1.3,'PCD was coarsened back to registration resolution'
             assert sensors.valid is False,'Mapping must never enable navigation motion'
+            import yaml
+            assert yaml.safe_load((Path(directory)/'latest/nav.yaml').read_text())['resolution'] == 0.05
             if dense:
-                import yaml
                 metadata = yaml.safe_load((Path(directory)/'latest/metadata.yaml').read_text())
                 np.testing.assert_allclose(metadata['ground_model']['plane'][:3],[0,0,1],atol=0.02,
                                            err_msg='Initial body roll tilted the saved floor')

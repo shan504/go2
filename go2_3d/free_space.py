@@ -17,16 +17,19 @@ def visible_free(source):
     return nav,known
 
 
-def resample_free(source, ground, transform, resolution, max_cells=4_000_000):
-    """Keep a fine cell only when its old-grid bounding box is all known free.
+def resample_free(source, ground, transform, resolution, max_cells=4_000_000,
+                  allow_coarser=False):
+    """Keep a destination cell only if its old-grid bounding box is all free.
 
     Old cells describe areas, not isolated samples. Inverse-project the full
-    fine cell onto the old floor lattice; conservative bounding boxes also
-    prevent rotation from clearing any previously unknown/occupied cell.
+    destination cell onto the old floor lattice; conservative bounding boxes
+    also prevent rotation/coarsening from clearing unknown/occupied areas.
+    Coarsening is opt-in for runtime grids; offline leveling keeps its contract.
     """
     nav,known = visible_free(source)
     old_resolution = float(nav['resolution'])
-    if not 0 < resolution <= old_resolution+1e-8:
+    if (not np.isfinite(resolution) or resolution <= 0 or
+            (not allow_coarser and resolution > old_resolution+1e-8)):
         raise ValueError('Free-area transfer requires an equal or finer resolution')
     plane = np.asarray(ground['plane'],dtype=float)
     matrix = np.asarray(transform,dtype=float)

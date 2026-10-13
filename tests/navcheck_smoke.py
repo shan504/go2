@@ -97,7 +97,7 @@ assert 'closest lethal cell to goal:' in summary
 assert 'at scan stamp+0.05s=True' in summary
 assert 'finite_returns=2' in summary
 assert 'near goal XY (radius 0.25m): points=2' in summary
-assert 'Legacy map lacks a ground model' in summary
+assert 'Runtime navigation ground model unavailable; restart with run.sh navigation' in summary
 assert node.velocity_stats['/cmd_vel_nav']['nonzero']>0
 assert node.velocity_stats['/cmd_vel']['nonzero']==0
 assert 'max_abs_vx_vy_yaw=[0.08, 0.0, 0.0]' in summary
