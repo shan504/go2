@@ -11,7 +11,7 @@ from rcl_interfaces.srv import SetParameters, GetParameters
 from rclpy.action import ActionClient
 from std_msgs.msg import Bool, Empty, String
 from std_srvs.srv import Trigger
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PointStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import OccupancyGrid
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -72,6 +72,9 @@ class Operator(Node):
         self.create_subscription(Empty,'/navigation/cancel',self.on_cancel,1)
         self.create_subscription(Empty,'/navigation/resume',self.on_resume,1)
         self.create_subscription(PoseStamped,'/goal_pose',self.on_goal,100)
+        # Retain the explicit single-click waypoint input used by older saved
+        # layouts. The unrelated /clicked_point measuring tool stays separate.
+        self.create_subscription(PointStamped,'/navigation/waypoint',self.on_waypoint,100)
         self.create_timer(0.1,self.watchdog)
         # Full snapshots also recover the numbered route after a panel
         # reconnects with a volatile subscription, without changing motion.
@@ -284,6 +287,13 @@ class Operator(Node):
         self.report('Retrying paused waypoint; remaining order preserved')
         self.check_motion_state()
 
+    def on_waypoint(self,message):
+        pose = PoseStamped()
+        pose.header = copy.deepcopy(message.header)
+        pose.pose.position = copy.deepcopy(message.point)
+        pose.pose.orientation.w = 1.0
+        self.on_goal(pose)
+
     def on_goal(self,message):
         if self.action is None:
             self.report('Goal rejected: navigation mode required')
@@ -303,14 +313,11 @@ class Operator(Node):
         if len(self.waypoints) + int(self.inflight_waypoint is not None) >= 100:
             self.report('Goal rejected: waypoint queue limit is 100')
             return
-        if not self.action.server_is_ready():
-            self.report(f'Goal rejected: Nav2 NavigateToPose action unavailable; {self.startup_status}')
-            return
         try:
-            if self.localized():
-                self.validate_goal(message)
-            else:
-                self.validate_map_goal(message)
+            # Collection is map-relative and must survive Nav2 startup,
+            # transient TF/costmap loss and rolling-window changes. Every
+            # dispatch still rechecks all live conditions in send_waiting_goal.
+            self.validate_map_goal(message)
         except (ValueError,TransformException) as error:
             self.report(f'Goal rejected: {error}')
             return

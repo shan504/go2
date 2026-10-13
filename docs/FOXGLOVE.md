@@ -118,7 +118,8 @@ SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用
 
 可直接导入 [预设导航布局](foxglove_go2_navigation.json)。它包含两个俯视 3D 面板：
 左面板预设 `/initialpose` 位姿估计，右面板预设 `/goal_pose` 位姿目标；相机、定位状态和
-启用/停止/取消按钮同时显示。通过 Foxglove 布局菜单选择“从文件导入 / Import from file”。
+启用/停止/取消按钮同时显示。相机是Image图像面板，选目标使用右侧3D面板。
+通过 Foxglove 布局菜单选择“从文件导入 / Import from file”。
 Windows PowerShell 下载文件：
 
 ```powershell
@@ -209,6 +210,7 @@ ros2 lifecycle get --no-daemon /planner_server
 
 ## 导航
 
+所有地图共用同一套路线收集、编号显示和导航启动检查，包括新保存、保留版本及后来切换的地图。
 使用 3D 面板的发布位姿工具连续选择多个目标。
 `/operator/status` 显示 `Goal queued`，新路线先收集，上一轮运动开关仍开启也不会提前出发。
 再在启用运动面板单次发布 `{"data":true}`；程序确认桥的实际启用参数、重新检查定位/TF/目标格后，
@@ -217,28 +219,42 @@ ros2 lifecycle get --no-daemon /planner_server
 - 目标话题 `/goal_pose`，类型 `geometry_msgs/msg/PoseStamped`，参考系 `map`。
 - 在设置的“发布”分组选择“位姿 / Pose”，话题为 `/goal_pose`；或长按场景右侧发布工具选择 **Publish pose**。
 - 再单击工具按钮启用它；在已观察到的空地单击一次，再移动鼠标、单击一次形成箭头并发布。
-  两次点击都在同一个Pose工具内完成，不需要选择Click point；工具若退出激活状态，下一个点前重新启用Pose。
+  每个航点都需完成“位置、朝向”这两次点击；只点位置尚未发布目标。
+  两次点击都在同一个Pose工具内完成；工具若退出激活状态，下一个点前重新启用Pose。
   巡检按位置到达：当前距离目标≤30厘米即可，终点不要求对齐这个箭头。
 - 首次选近距离目标，观察 `/plan`、局部障碍和机器人响应。
 
+若希望每个航点只点击位置一次，可在3D面板另行将发布工具设为“点 / Point”，
+点话题明确填写 `/navigation/waypoint`，消息类型为 `geometry_msgs/msg/PointStamped`，参考系为 `map`。
+这个专用入口兼容旧版单击航点布局，与Goal Pose共用同一条编号队列及全部启动检查；
+选完全部点后仍需启用一次。普通 `/clicked_point` 测量点不会加入路线。
+
 新增的 `operator_bridge.py` 把 `/goal_pose` 转换为 `/navigate_to_pose` action。
 Nav2 原生的 `/goal_pose` 订阅在启动组内重映射，避免绕过操作节点或重复发 action。
-每完成一个目标应显示 `Waypoint #1/#2/#3 appended`，`queued`累计增加；点启用后才显示Nav2接受目标。
-非导航模式或目标参考系错误时会拒绝。定位无效时可保存静态地图上的目标，但不能启动导航。
-原始地图目标值 100、代价地图目标值 99/100、未知目标和过期代价地图也会明确拒绝，
-信息包含话题、格子和数值。地图中固定目标归一化为最新时间语义和 yaw 姿态。
+每完成一个航点应显示 `Waypoint #1 appended`、`Waypoint #2 appended`、`Waypoint #3 appended`，
+`queued`累计增加并显示全部编号；选完所有点后只点一次“启用运动”，才开始按编号执行。
+`Goal queued`表示已收集、尚未启动；`Goal rejected: ...`表示本次输入未加入队列，需查看后面的原因。
+非导航模式、目标参考系错误、静态地图目标格为障碍或未知时会拒绝收集。
+定位暂时无效、Nav2尚未就绪或实时TF/代价地图暂时不可用时，仍可收集有效静态地图上的航点。
+启动和发送下一个点前才检查实时定位、TF、Nav2 action、运动开关及代价地图；
+代价地图目标值99/100、未知格和过期代价地图会阻止执行并保留暂停路线，信息包含话题、格子和数值。
+地图中固定目标归一化为最新时间语义和 yaw 姿态。
 规划失败不再自动执行原地 Spin 或 BackUp，避免把恢复动作误认为目标导航。
 每个目标追加到同一队列，当前点真实成功后才发送下一点；运行中也可追加，中途不要点停止/取消。
 停止或取消会清空路线。定位失效会停车、取消当前action并保留当前点与后续点；
 定位恢复后点“启用运动”继续，不会自动恢复。真实规划/控制失败仍需显式“重试暂停路线”。
 在主题显示中开启 `/navigation/waypoints` 查看全部编号；`/goal_pose`自身仅渲染最新箭头。
+绿色为待执行、橙色为当前航点、红色为暂停航点。只看到最新箭头不表示队列只有一个点，
+以编号和 `/operator/status` 的 `queued`为准。拉取代码不会覆盖浏览器保存的布局；
+导入新版 `docs/foxglove_go2_navigation.json`，或手动将目标工具设为Pose、话题设为 `/goal_pose`并开启编号话题。
 
 点云和TF分别经DDS到达，点云先到时会暂存并重试其原时间戳对应的TF，不直接丢帧。
 仍维持1秒原始数据期限，过期或非法变换不能恢复定位。`/localization/status` 的
 `clouds_received/aligned/tf_waits/expired/pending` 区分收包、对齐、等待和丢弃；
 `processing_time/source_age` 报告配准耗时和该次结果所用点云的原始接收年龄。
 `tools.sh enable/disable` 也通过相同操作节点，支持上述顺序。
-Nav2 action 不可用时，启用与目标操作会拒绝并附上最新启动状态；仅定位有效不足以启动导航。
+Nav2 action 不可用时，启用或执行航点会拒绝并附上最新启动状态；已收集的路线保留。
+仅定位有效不足以启动导航。
 启动状态现在分别报告等待定位、TF/时间戳、持续就绪和生命周期管理服务。
 
 “启用运动”只是允许运动桥执行 Nav2 的速度命令，不会自己产生前进命令。

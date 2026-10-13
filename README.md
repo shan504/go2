@@ -230,8 +230,9 @@ Nav2 使用动态 `base_footprint`：投影到 map 栅格的 XY 平面，保留�
 多点导航沿用这套单点控制，操作节点按点击顺序逐一发送 `NavigateToPose`：
 
 1. 更新后保持狗站稳，在第二个SSH终端执行 `bash go2_3d/tools.sh restart-navigation`，保留当前位置重启。
-2. 确认Nav2已启动，用Foxglove的“发布2D位姿 /goal_pose”依次设置多个目标。
+2. 静态地图加载后，用Foxglove的“发布2D位姿 /goal_pose”依次设置多个目标。
    每点完成“单击位置、单击朝向”这两次点击；不需要切换到Click point。
+   旧布局或单击输入可用Point工具发布到 `/navigation/waypoint`，参考系为map；它进入同一队列。
    新路线先收集，即使上一轮运动开关仍开启，也不会在点第一个目标时提前出发。
 3. 点一次“启用运动”。到第一个点确认 `SUCCEEDED` 后自动走第二个，直到队列完成；运行中也可以追加。
    `/operator/status` 显示 `route current=编号 queued=剩余数 completed=完成数 paused=是否暂停`。
@@ -241,7 +242,8 @@ Nav2 使用动态 `base_footprint`：投影到 map 栅格的 XY 平面，保留�
 
 “停止运动＋取消导航”和“取消路线”都会清空队列。定位丢失会停车、取消当前action，
 保留当前点及后续点并暂停；恢复定位后点“启用运动”，从保留的当前点继续。恢复不会自动出发。
-定位暂时无效时仍可收集有效map坐标目标，启动及每次发送下一个点前重新检查定位、TF和代价地图。
+所有地图共用这一导航流程。定位、Nav2、TF或实时代价地图暂未就绪时仍可收集静态地图上的有效目标，
+不会因启动期间的实时状态丢弃后续航点；启动及每次发送下一个点前重新检查全部条件。
 新版布局 [docs/foxglove_go2_navigation.json](docs/foxglove_go2_navigation.json) 增加“重试暂停路线”，
 `/navigation/waypoints` 显示编号：绿色待执行、橙色当前、红色暂停。已有布局也能直接连续选点，
 可自行添加该MarkerArray话题来显示所有航点；`/goal_pose`自身仅显示最新箭头。
@@ -304,7 +306,7 @@ Jammy 的 0.14 均通过；ROS2 Humble 模拟三维传感器测试通过建图�
 地图重载、初始位姿定位与传感器丢失失效检查。原 DDS 包 4 项测试及 SDK 配置生成检查通过。
 定位新增 5 厘米细 GICP 和仅针对已接受校正的滤波；模拟测试确认错误参考系不会初始化，
 静止跳变被拒绝后不会更新 TF 或报告有效，传感器失效保护继续生效。
-Foxglove 导航接口通过真实 `NavigateToPose` 测试 action server 验证：无定位时拒绝操作、
+Foxglove 导航接口通过真实 `NavigateToPose` 测试 action server 验证：无定位时拒绝执行、
 点选位姿转 action、启用/关闭运动参数、定位丢失时取消目标。该测试不执行 Nav2 路径规划或运动。
 目标先选、运动后启用的回归已验证：禁用时等待超过 10 秒仍不发送 action，参数确认后才启动；
 启用被拒绝、取消、定位失效和等待期间目标格变为障碍均不会启动该目标。

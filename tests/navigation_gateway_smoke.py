@@ -55,6 +55,7 @@ class TestEndpoints(Node):
             QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.startup.publish(String(data='Nav2 deferred awaiting TF'))
         self.grids = {}
+        self.grid_enabled = {}
         retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String,'/operator/status',lambda m: setattr(self,'operator_status',m.data),retained)
         for topic in ('/map','/global_costmap/costmap','/local_costmap/costmap'):
@@ -67,6 +68,7 @@ class TestEndpoints(Node):
             grid.info.origin.orientation.w = 1.0
             grid.data = [0]*2500
             self.grids[topic] = (publisher,grid)
+            self.grid_enabled[topic] = True
         self.create_timer(0.05,lambda: self.pub.publish(Bool(data=self.valid)))
         self.create_timer(0.05,self.sensors)
         if start_action:
@@ -86,7 +88,9 @@ class TestEndpoints(Node):
             transforms.append(tf)
         if self.tf_enabled:
             self.tf.sendTransform(transforms)
-        for publisher,grid in self.grids.values():
+        for topic,(publisher,grid) in self.grids.items():
+            if not self.grid_enabled[topic]:
+                continue
             grid.header.stamp = stamp
             publisher.publish(grid)
 
@@ -126,6 +130,7 @@ if __name__ == '__main__':
         pose.pose.position.x = 1.0
         pose.pose.orientation.w = 1.0
         endpoints.goal.publish(pose)
+        wait_for(lambda: len(operator.waypoints)==1)
         endpoints.enable.publish(Bool(data=True))
         time.sleep(0.3)
         assert endpoints.goals == 0
@@ -139,8 +144,11 @@ if __name__ == '__main__':
         assert 'Nav2 deferred awaiting TF' in endpoints.operator_status
         assert endpoints.get_parameter('enable_control').value is False
         endpoints.goal.publish(pose)
-        wait_for(lambda: 'Goal rejected: Nav2 NavigateToPose action unavailable' in endpoints.operator_status)
+        wait_for(lambda: len(operator.waypoints)==2)
         assert endpoints.goals==0
+        assert [p.pose.position.x for _,p in operator.waypoints]==[1.0,1.0]
+        endpoints.cancel.publish(Empty())
+        wait_for(lambda: not operator.waypoints and not operator.route_paused)
         endpoints.start_action()
         wait_for(operator.action.server_is_ready)
         # An old body-relative pose must not bypass the gateway into Nav2.
@@ -148,9 +156,10 @@ if __name__ == '__main__':
         pose.header.stamp.sec = 1
         endpoints.goal.publish(pose)
         time.sleep(0.2)
-        assert endpoints.goals == 0
+        assert endpoints.goals == 0 and not operator.waypoints
         pose.header.frame_id = 'map'
-        # Reject actual map obstacles and inflation clearance before recovery.
+        # Static-map obstacles reject collection. Live clearance is checked
+        # when execution starts, so it cannot discard an intended waypoint.
         for topic,value in (('/map',100),('/local_costmap/costmap',99)):
             _,grid = endpoints.grids[topic]
             # ROS wire resolution is float32; use the received geometry so
@@ -160,15 +169,29 @@ if __name__ == '__main__':
             grid.data[index] = value
             wait_for(lambda: operator.grids[topic][0].data[index]==value)
             endpoints.goal.publish(pose)
-            time.sleep(0.2)
+            if topic=='/map':
+                wait_for(lambda: 'Goal rejected: /map:' in endpoints.operator_status)
+                assert not operator.waypoints
+            else:
+                wait_for(lambda: len(operator.waypoints)==1)
+                endpoints.enable.publish(Bool(data=True))
+                wait_for(lambda: operator.route_pause_reason=='validation')
+                assert operator.waiting_goal.pose.position.x==1.0
+                endpoints.cancel.publish(Empty())
+                wait_for(lambda: not operator.waypoints and not operator.route_paused)
             assert endpoints.goals == 0,f'{topic} blocked goal reached Nav2'
             grid.data[index] = 0
             wait_for(lambda: operator.grids[topic][0].data[index]==0)
         endpoints.tf_enabled = False
         time.sleep(0.7)
         endpoints.goal.publish(pose)
-        time.sleep(0.2)
+        wait_for(lambda: len(operator.waypoints)==1)
+        endpoints.enable.publish(Bool(data=True))
+        wait_for(lambda: operator.route_pause_reason=='validation')
         assert endpoints.goals == 0,'A true validity flag with stale TF allowed a goal'
+        assert operator.waiting_goal.pose.position.x==1.0
+        endpoints.cancel.publish(Empty())
+        wait_for(lambda: not operator.waypoints and not operator.route_paused)
         endpoints.tf_enabled = True
         wait_for(lambda: (operator.get_clock().now()-rclpy.time.Time.from_msg(
             operator.buffer.lookup_transform('map','base_footprint',rclpy.time.Time()).header.stamp)).nanoseconds < 100_000_000)
