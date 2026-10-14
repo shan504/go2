@@ -1,8 +1,13 @@
-"""3D navigation envelope, based on the successful 0.30m/s Go2 hardware test."""
+"""Shared navigation limits and the dedicated path-alignment turn rate."""
 import math
 
 LINEAR_SPEED = 0.30
-YAW_SPEED = 0.30
+TRACKING_YAW_SPEED = 0.30
+# Hardware response trial: 0.30rad/s reached Sport but produced only 2.1deg
+# in ten seconds. Keep tracking turns unchanged; request 0.50 only for the
+# shim's deliberate path alignment, with matching smoother/bridge limits.
+PATH_TURN_SPEED = 0.50
+YAW_SPEED = PATH_TURN_SPEED
 LINEAR_ACCELERATION = 0.40
 YAW_ACCELERATION = 0.60
 TRAJECTORY_TIME = 1.20
@@ -24,12 +29,12 @@ def configure_navigation(nav):
                   angular_dist_threshold=PATH_HEADING_THRESHOLD,
                   angular_disengage_threshold=PATH_HEADING_RELEASE,
                   forward_sampling_distance=0.25,
-                  rotate_to_heading_angular_vel=YAW_SPEED,
+                  rotate_to_heading_angular_vel=PATH_TURN_SPEED,
                   max_angular_accel=YAW_ACCELERATION,
                   simulate_ahead_time=1.0, rotate_to_goal_heading=False,
                   closed_loop=False)
-    # A 180-degree turn at 0.30rad/s takes over 10s. Recognize actual heading
-    # progress instead of mistaking an in-place turn for a positional stall.
+    # Recognize actual heading progress instead of mistaking an in-place
+    # turn for a positional stall, independently of the requested turn rate.
     # A genuinely stationary robot still fails after the same 10s deadline.
     controller['progress_checker'].update(
         plugin='nav2_controller::PoseProgressChecker',
@@ -40,7 +45,7 @@ def configure_navigation(nav):
     # Two X samples retain 0 for turns and 0.30 for forward trajectories.
     # Do not clamp a planned slow command upward in the actuator bridge.
     follow.update(min_vel_x=0.0, max_vel_x=LINEAR_SPEED,
-                  min_vel_y=0.0, max_vel_y=0.0, max_vel_theta=YAW_SPEED,
+                  min_vel_y=0.0, max_vel_y=0.0, max_vel_theta=TRACKING_YAW_SPEED,
                   min_speed_xy=0.0, max_speed_xy=LINEAR_SPEED,
                   min_speed_theta=0.0, vx_samples=FORWARD_SAMPLES, vy_samples=1,
                   trajectory_generator_name='dwb_plugins::StandardTrajectoryGenerator',

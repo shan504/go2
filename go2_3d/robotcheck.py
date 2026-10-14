@@ -28,6 +28,7 @@ class RobotCheck(Node):
         self.observers, self.type_errors = {}, {}
         self.sent, self.replies = {}, {}
         self.initial_xy, self.maximum_displacement = {}, {}
+        self.maximum_yaw_speed,self.maximum_gyro_z,self.native_heading = {},{},{}
         self.query_publishers = {}
         for service in self.QUERIES:
             self.query_publishers[service] = self.create_publisher(Request, f'/api/{service}/request', 10)
@@ -65,6 +66,19 @@ class RobotCheck(Node):
         maximum = self.maximum_velocity.setdefault(topic, [0.0, 0.0, 0.0])
         self.maximum_velocity[topic] = [max(old, abs(float(value)))
                                         for old, value in zip(maximum, message.velocity)]
+        yaw_speed = float(message.yaw_speed)
+        if math.isfinite(yaw_speed):
+            self.maximum_yaw_speed[topic] = max(self.maximum_yaw_speed.get(topic,0.0),abs(yaw_speed))
+        imu = getattr(message,'imu_state',None)
+        if imu is not None:
+            gyro,yaw = float(imu.gyroscope[2]),float(imu.rpy[2])
+            if math.isfinite(gyro):
+                self.maximum_gyro_z[topic] = max(self.maximum_gyro_z.get(topic,0.0),abs(gyro))
+            if math.isfinite(yaw):
+                last,unwrapped,span = self.native_heading.get(topic,(yaw,0.0,0.0))
+                delta = math.atan2(math.sin(yaw-last),math.cos(yaw-last))
+                unwrapped += delta
+                self.native_heading[topic] = (yaw,unwrapped,max(span,abs(unwrapped)))
         xy = [float(value) for value in message.position[:2]]
         if all(math.isfinite(value) for value in xy):
             initial = self.initial_xy.setdefault(topic, xy)
@@ -115,11 +129,17 @@ class RobotCheck(Node):
                       ('mode', 'gait_type', 'error_code', 'body_height', 'yaw_speed')}
             fields.update({name: list(getattr(message, name)) for name in
                            ('velocity', 'position', 'range_obstacle')})
+            imu = getattr(message,'imu_state',None)
+            if imu is not None:
+                fields.update(imu_rpy=list(imu.rpy),imu_gyroscope=list(imu.gyroscope))
             lines.append(f'{topic}: messages={self.counts[topic]} receipt_age={now-received:.2f}s {fields}')
             lines.append(f'  observed_mode_gait_error={sorted(self.modes[topic])} '
                          f'max_abs_native_velocity={self.maximum_velocity[topic]}')
             lines.append(f'  max_native_XY_displacement={self.maximum_displacement.get(topic, 0.0):.3f}m '
                          '(since first observed state)')
+            lines.append(f'  max_abs_native_yaw_speed={self.maximum_yaw_speed.get(topic,0.0):.4f}rad/s '
+                         f'max_abs_IMU_gyro_z={self.maximum_gyro_z.get(topic,"unavailable")}rad/s '
+                         f'max_IMU_heading_change={math.degrees(self.native_heading.get(topic,(0.,0.,0.))[2]):.2f}deg')
         lines.append('Native velocity is measured state; the command velocity is different. '
                      'Preserve raw mode/gait numbers for the installed Go2 firmware.')
         return '\n'.join(lines)

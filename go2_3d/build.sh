@@ -13,4 +13,4 @@ sudo docker run --rm --network none --entrypoint /bin/bash \
 sudo docker run --rm --network none --entrypoint /bin/bash \
   -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp -e CYCLONEDDS_URI= \
   -v "$project_dir:/opt/go2_project:ro" go2-3d:edu -c \
-  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && cd /opt/go2_project && timeout 90 python3 tests/map_start_localization_smoke.py && timeout 90 python3 tests/initial_pose_startup_smoke.py'
+  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && cd /opt/go2_project && timeout 90 python3 tests/map_start_localization_smoke.py && timeout 90 python3 tests/initial_pose_startup_smoke.py && timeout 90 python3 tests/localization_turn_smoke.py'

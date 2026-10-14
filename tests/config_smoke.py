@@ -16,19 +16,23 @@ before = {p:p.read_bytes() for p in sdk.rglob('*') if p.is_file()}
 module.get_package_share_directory = lambda package: str(sdk)
 module.main()
 params = yaml.safe_load(Path('/runtime/config/nav2_3d.yaml').read_text())
-from motion_profile import (LINEAR_SPEED, YAW_SPEED, LINEAR_ACCELERATION, TRAJECTORY_TIME,
+from motion_profile import (LINEAR_SPEED, YAW_SPEED, PATH_TURN_SPEED, TRACKING_YAW_SPEED,
+                            LINEAR_ACCELERATION, YAW_ACCELERATION, TRAJECTORY_TIME,
                             ARRIVAL_RADIUS, PATH_HEADING_THRESHOLD, PATH_HEADING_RELEASE, PROGRESS_ANGLE)
 follow = params['controller_server']['ros__parameters']['FollowPath']
 smoother = params['velocity_smoother']['ros__parameters']
 assert follow['max_vel_x'] == follow['max_speed_xy'] == smoother['max_velocity'][0] == LINEAR_SPEED == 0.30
-assert follow['max_vel_theta'] == smoother['max_velocity'][2] == YAW_SPEED
+assert follow['max_vel_theta'] == TRACKING_YAW_SPEED == 0.30
+assert smoother['max_velocity'][2] == -smoother['min_velocity'][2] == YAW_SPEED == PATH_TURN_SPEED == 0.50
 assert follow['min_vel_x'] == smoother['min_velocity'][0] == 0.0
 assert follow['min_vel_y'] == follow['max_vel_y'] == 0.0
 assert follow['plugin'] == 'nav2_rotation_shim_controller::RotationShimController'
 assert follow['primary_controller'] == 'dwb_core::DWBLocalPlanner'
 assert follow['angular_dist_threshold'] == PATH_HEADING_THRESHOLD
 assert follow['angular_disengage_threshold'] == PATH_HEADING_RELEASE < PATH_HEADING_THRESHOLD
-assert follow['rotate_to_heading_angular_vel'] == YAW_SPEED
+assert follow['rotate_to_heading_angular_vel'] == PATH_TURN_SPEED
+assert follow['max_angular_accel'] == follow['acc_lim_theta'] == smoother['max_accel'][2] == YAW_ACCELERATION == 0.60
+assert follow['decel_lim_theta'] == smoother['max_decel'][2] == -YAW_ACCELERATION
 assert follow['closed_loop'] is False and follow['rotate_to_goal_heading'] is False
 assert follow['vx_samples'] == 2 and follow['vy_samples'] == 1
 assert follow['trajectory_generator_name'] == 'dwb_plugins::StandardTrajectoryGenerator'
@@ -79,4 +83,4 @@ behavior = ET.parse(root/'go2_3d/navigate.xml')
 assert not list(behavior.iter('Spin')) and not list(behavior.iter('BackUp'))
 assert list(behavior.iter('FollowPath'))[0].get('goal_checker_id') == 'general_goal_checker'
 assert all(p.read_bytes() == content for p,content in before.items())
-print('PASS SDK configuration: matched 0.30m/s envelope and forward samples, 0.30m position-only arrival with explicit goal checker, no terminal rotation, genuine stall timeout retained, protected SDK source unchanged')
+print('PASS SDK configuration: 0.30m/s forward and 0.30rad/s tracking retained; 0.50rad/s dedicated path-turn envelope; 0.30m position-only arrival, collision geometry and genuine stall timeout retained; protected SDK source unchanged')

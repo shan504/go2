@@ -196,6 +196,7 @@ class GicpEndpoints(Node):
         values = dict(scan_window=0.5, registration_period=0.5, validity_timeout=1.0,
                       voxel_size=0.15, localization_voxel_size=0.10,
                       localization_correspondence=0.30, submap_radius=25.0,
+                      localization_max_translation=0.80, localization_max_rotation_degrees=35.0,
                       localization_min_fitness=0.30, localization_max_rmse=0.15,
                       map_voxel_size=0.02, map_publish_period=3.0,
                       stationary_translation_limit=0.25, stationary_rotation_limit_degrees=8.0)
@@ -220,6 +221,8 @@ def localization_timeline():
         assert actual['stationary_translation_limit'] == 0.25
         assert actual['stationary_rotation_limit_degrees'] == 8.0
         assert actual['localization_min_fitness'] == 0.30 and actual['localization_max_rmse'] == 0.15
+        assert actual['localization_max_translation'] == 0.80
+        assert actual['localization_max_rotation_degrees'] == 35.0
         subscribers = monitor.get_subscriptions_info_by_topic('/localization/status')
         assert subscribers[0].qos_profile.durability == DurabilityPolicy.VOLATILE
         monitor.arm()

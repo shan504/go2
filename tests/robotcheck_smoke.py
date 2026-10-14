@@ -160,6 +160,18 @@ def states_and_readonly_queries():
         assert (3, 1, 0) in monitor.modes['/sportmodestate']
         assert abs(monitor.maximum_velocity['/sportmodestate'][0] - 0.12) < 1e-6
         assert abs(monitor.maximum_displacement['/sportmodestate']-0.5) < 1e-6
+        endpoints.high_state.imu_state.rpy = [0.0, 0.0, 3.12]
+        endpoints.high_state.imu_state.gyroscope = [0.0, 0.0, 0.5]
+        harness.wait(lambda: monitor.maximum_gyro_z.get('/sportmodestate',0.0) > 0.49)
+        # Start a fresh IMU interval at the angle boundary, then cross it.
+        monitor.native_heading['/sportmodestate'] = (3.12,0.0,0.0)
+        endpoints.high_state.imu_state.rpy = [0.0, 0.0, -3.12]
+        harness.wait(lambda: monitor.native_heading['/sportmodestate'][0] < 0.0)
+        assert 0.04 < monitor.native_heading['/sportmodestate'][2] < 0.05
+        summary = monitor.summary()
+        assert 'imu_rpy' in summary and 'imu_gyroscope' in summary
+        assert 'max_abs_native_yaw_speed=0.2500rad/s' in summary
+        assert 'max_abs_IMU_gyro_z=0.5rad/s' in summary
         for _ in range(3):
             monitor.send_queries()
         harness.spin(0.55)

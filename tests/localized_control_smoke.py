@@ -92,7 +92,7 @@ try:
     assert bridge.cmd_received>0 and bridge.cmd_nonzero>0,'Raw disabled commands not observed'
     assert bridge.cmd_dropped['motion_disabled']>0 and bridge.cmd_gate_accepted==0
     assert bridge.gate.max_linear == bridge.get_parameter('max_linear_speed').value == 0.30
-    assert bridge.gate.max_yaw == bridge.get_parameter('max_yaw_speed').value == 0.30
+    assert bridge.gate.max_yaw == bridge.get_parameter('max_yaw_speed').value == 0.50
     robot.command = None
     spin(0.2)  # Drain in-flight source messages before checking enable reset.
     bridge.set_parameters([Parameter('enable_control',value=True)])
@@ -117,6 +117,16 @@ try:
         wait_for(lambda: bridge.last_move is not None and abs(bridge.last_move[1][0]-speed)<1e-6
                  and robot.requests[-1].header.identity.api_id==1008
                  and abs(json.loads(robot.requests[-1].parameter)['x']-speed)<1e-6)
+    # Heading alignment must reach Sport at the dedicated turn rate. Small
+    # planned yaw commands remain small, and larger input is capped.
+    robot.command.linear.x = 0.0
+    for requested, expected in ((0.50, 0.50), (0.08, 0.08), (-0.50, -0.50), (0.80, 0.50)):
+        robot.command.angular.z = requested
+        wait_for(lambda: bridge.last_move is not None and abs(bridge.last_move[1][2]-expected)<1e-6
+                 and robot.requests[-1].header.identity.api_id==1008
+                 and abs(json.loads(robot.requests[-1].parameter)['z']-expected)<1e-6)
+        assert json.loads(robot.requests[-1].parameter)['x']==0.0
+        assert json.loads(robot.requests[-1].parameter)['y']==0.0
     # A response from another SDK client must not replace our diagnostic state.
     unrelated = Response()
     unrelated.header.identity.id,unrelated.header.identity.api_id = 1,1008

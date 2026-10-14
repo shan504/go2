@@ -59,7 +59,8 @@ class Mapper(Node):
                         registration_period=0.5, validity_timeout=1.0,
                         correspondence_distance=0.7, min_fitness=0.55, max_rmse=0.20,
                         max_translation=0.6, max_rotation=0.35,
-                        localization_voxel_size=0.10, localization_correspondence=0.30,
+                        localization_voxel_size=0.10, localization_correspondence=0.50,
+                        localization_max_translation=0.80, localization_max_rotation_degrees=35.0,
                         localization_min_fitness=0.30, localization_max_rmse=0.15,
                         stationary_translation_limit=0.25, stationary_rotation_limit_degrees=8.0,
                         correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
@@ -71,7 +72,9 @@ class Mapper(Node):
             raise ValueError('correction_alpha must be greater than 0 and at most 1')
         if self.p['mode'] not in ('mapping','localization'):
             raise ValueError('mode must be mapping or localization')
-        for name in ('stationary_translation_limit', 'stationary_rotation_limit_degrees'):
+        for name in ('stationary_translation_limit', 'stationary_rotation_limit_degrees',
+                     'localization_correspondence', 'localization_max_translation',
+                     'localization_max_rotation_degrees'):
             if not np.isfinite(self.p[name]) or self.p[name] <= 0:
                 raise ValueError(f'{name} must be finite and positive')
         map_name(self.p['map_name'])
@@ -379,8 +382,8 @@ class Mapper(Node):
                                correspondence=self.p['localization_correspondence'],
                                min_fitness=self.p['localization_min_fitness'],
                                max_rmse=min(self.p['max_rmse'],self.p['localization_max_rmse']),
-                               max_translation=self.p['max_translation'] if seeded else 2.0,
-                               max_rotation=self.p['max_rotation'] if seeded else 0.8,
+                               max_translation=self.p['localization_max_translation'] if seeded else 2.0,
+                               max_rotation=np.deg2rad(self.p['localization_max_rotation_degrees']) if seeded else 0.8,
                                iterations=25,innovation_guess=guess)
                 require_match(result, 'Fine GICP ')
                 matched,fitness,rmse = result.transform,result.fitness,result.rmse

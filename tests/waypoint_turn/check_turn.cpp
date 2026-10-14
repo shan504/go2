@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -138,7 +139,7 @@ int main(int argc, char ** argv)
       point.pose.position.y=i*.05*std::sin(target); path.poses.push_back(point);
     }
     shim.deactivate(); shim.activate(); shim.setPlan(path);
-    bool handed_off=false; int turns=0;
+    bool handed_off=false; int turns=0; double max_command=0.0;
     for (int step=0; step<200; ++step) {
       clockAt(clock, 100+step*.1); p=pose(heading);
       geometry_msgs::msg::TransformStamped transform;
@@ -156,12 +157,15 @@ int main(int argc, char ** argv)
       }
       require(command.linear.x==0 && command.linear.y==0, "Translation during heading alignment");
       require(command.angular.z*target>0, "Turn sign points away from new path");
+      max_command=std::max(max_command,std::abs(command.angular.z));
       heading += command.angular.z*.1; ++turns;
       if (step%10==0) {shim.setPlan(path);} // Match the real 1Hz replanning.
     }
     require(handed_off && turns>0, "New waypoint never transitioned from turning to walking");
+    require(std::abs(max_command-yaw_speed)<1e-9, "Dedicated path turn did not reach its requested yaw rate");
   }
-  std::cout << "PASS official rotation shim: left/right 126deg and 179deg paths, 1Hz replans, zero measured yaw; turn then handoff to 0.30m/s tracker\n";
+  std::cout << "PASS official rotation shim: left/right 126deg and 179deg paths, 1Hz replans, zero measured yaw; reaches "
+            << yaw_speed << "rad/s turn output then hands off to 0.30m/s tracker\n";
   std::fill(grid->getCharMap(), grid->getCharMap()+160*160, nav2_costmap_2d::LETHAL_OBSTACLE);
   bool blocked=false;
   try {shim.rotate(2.2, pose(0));} catch (const std::runtime_error &) {blocked=true;}

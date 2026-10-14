@@ -59,9 +59,16 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
             assert values['max_map_points'] == (1000000 if profile == 'dense' else 200000)
             assert values['localization_voxel_size'] == 0.10
             assert values['grid_resolution'] == 0.10
-            assert values['localization_correspondence'] == 0.30
+            assert values['localization_correspondence'] == 0.50
+            assert values['localization_max_translation'] == 0.80
+            assert values['localization_max_rotation_degrees'] == 35.0
             assert values['localization_min_fitness'] == 0.30
             assert values['localization_max_rmse'] == 0.15
+            assert values['correspondence_distance'] == 0.7
+            assert values['max_translation'] == 0.6
+            assert values['max_rotation'] == 0.35
+            assert values['min_fitness'] == 0.55
+            assert values['max_rmse'] == 0.20
             assert values['validity_timeout'] == 1.0
             assert values['stationary_translation_limit'] == 0.25
             assert values['stationary_rotation_limit_degrees'] == 8.0
@@ -81,7 +88,9 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
                 for name in ('scan_window', 'map_voxel_size', 'validity_timeout',
                              'stationary_translation_limit', 'stationary_rotation_limit_degrees',
                              'localization_voxel_size', 'localization_correspondence',
-                             'localization_min_fitness', 'localization_max_rmse'):
+                             'localization_max_translation', 'localization_max_rotation_degrees',
+                             'localization_min_fitness', 'localization_max_rmse',
+                             'max_translation', 'max_rotation'):
                     actual = probe.declare_parameter(name, 0.0).value
                     assert actual == values.get(name, 0.0), (mode, profile, name, actual)
                 for name in ('auto_initialize','initial_from_map_start'):
