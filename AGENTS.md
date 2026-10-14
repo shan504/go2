@@ -17,3 +17,8 @@ to repair one map in place of fixing the shared processing path.
   repeated loading and both localization/navigation launch paths. Check actual
   PCD geometry and body/footprint heights, not only configuration dictionaries.
 - Report synthetic/ROS checks separately from actual robot validation.
+- Default localization/navigation assumes the robot is placed at the selected
+  map's own mapping start with the original heading. Preserve and transform its
+  full saved start pose across map saves, leveling and repeated loads. Explicit
+  coordinates or manual initialpose can override it; automatic initialization
+  still requires accepted GICP and does not enable motion by itself.

@@ -26,6 +26,7 @@ def generate_launch_description():
                        'map_directory':'/runtime/navigation_map',
                        'map_name': ParameterValue(LaunchConfiguration('map_name'), value_type=str),
                        'auto_initialize': ParameterValue(LaunchConfiguration('auto_initialize'), value_type=bool),
+                       'initial_from_map_start': ParameterValue(LaunchConfiguration('initial_from_map_start'), value_type=bool),
                        **{key: ParameterValue(LaunchConfiguration(key), value_type=float)
                           for key in ('initial_x', 'initial_y', 'initial_z', 'initial_yaw_degrees')}}]
         if mode.perform(context) != 'mapping':
@@ -42,7 +43,8 @@ def generate_launch_description():
         DeclareLaunchArgument('camera',default_value='true'),
         DeclareLaunchArgument('gicp_params',default_value=str(root/'go2_3d/gicp.yaml')),
         DeclareLaunchArgument('port',default_value='8765'),
-        DeclareLaunchArgument('auto_initialize',default_value='false'),
+        DeclareLaunchArgument('auto_initialize',default_value='true'),
+        DeclareLaunchArgument('initial_from_map_start',default_value='true'),
         DeclareLaunchArgument('initial_x',default_value='0.0'),
         DeclareLaunchArgument('initial_y',default_value='0.0'),
         DeclareLaunchArgument('initial_z',default_value='0.0'),

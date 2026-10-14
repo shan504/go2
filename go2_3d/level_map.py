@@ -13,6 +13,7 @@ from repair_map import grid_stats,repair
 from free_space import resample_free
 from denoise import clean_directory
 from map_library import inside, new_directory, publish, source_name
+from map_start import resolve_start_pose, validate_start_pose
 
 
 def level(root, resolution=0.05):
@@ -36,6 +37,7 @@ def level(root, resolution=0.05):
     ground = metadata.get('ground_model') or estimate_ground(points,params.get('floor_z',-0.3))
     transform, model, body_height = ground_alignment(
         points, ground, metadata.get('body_height_above_ground'))
+    start_pose = validate_start_pose(transform @ resolve_start_pose(root, source))
     grid = ObservedGrid(resolution)
     grid.free = resample_free(source,ground,transform,resolution,grid.max_cells)
     destination = new_directory(root,source_name(root,source),'leveled-')
@@ -54,6 +56,7 @@ def level(root, resolution=0.05):
                         navigation_denoise=denoise_report,
                         free_area_version=2,
                         body_height_above_ground=float(body_height),point_count=len(leveled),
+                        map_start_pose=start_pose.tolist(),
                         leveled_from=str(source),map_from_previous_map=transform.tolist(),
                         level_grid_stats=stats,
                         initial_pose_reference='z=0: standing body above floor; nonzero z: explicit body height',

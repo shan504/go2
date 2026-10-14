@@ -51,6 +51,21 @@ sys.exit(0)
             launch_arguments = calls[-1][calls[-1].index('bash')+1:]
             assert launch_arguments[:2] == [mode, '/opt/go2_project/go2_3d/'+
                                            ('gicp_dense.yaml' if profile == 'dense' else 'gicp.yaml')]
+            assert launch_arguments[2:] == ['true','0.0','0.0','0.0','0.0','default','true']
+            assert 'initial_from_map_start:="$9"' in calls[-1][calls[-1].index('bash')-1]
+            assert ('no /initialpose clicks required' in result.stdout) == (mode != 'mapping')
+            if mode != 'mapping':
+                for coordinates in (['1.25','-0.4','35'], ['1.25','-0.4','35','0.37']):
+                    logfile.write_text('')
+                    result = subprocess.run(['bash',str(checkout/'go2_3d/run.sh'),mode,profile,*coordinates],
+                                            env=environment,capture_output=True,text=True,timeout=5)
+                    assert result.returncode == 0,(mode,profile,result.stderr)
+                    explicit = [json.loads(line) for line in logfile.read_text().splitlines()][-1]
+                    explicit_arguments = explicit[explicit.index('bash')+1:]
+                    assert explicit_arguments[2:] == ['true',*coordinates[:3],
+                                                      coordinates[3] if len(coordinates)==4 else '0.0',
+                                                      'default','false']
+                    assert 'no /initialpose clicks required' not in result.stdout
     environment['GO2_PREPARE_EXIT'] = '1'
     logfile.write_text('')
     result = subprocess.run(['bash', str(checkout/'go2_3d/run.sh'), 'navigation', 'dense'],
@@ -59,4 +74,5 @@ sys.exit(0)
     assert result.returncode == 1
     assert not any(call[:2] == ['docker', 'stop'] or '--name' in call for call in calls)
 print('PASS shared map startup: mapping/localization/navigation standard+dense; '
+      'selected-map start automatic initialization and explicit XYZ/yaw override; '
       'current policy preflight precedes sensor stop; failed grid preparation prevents launch')

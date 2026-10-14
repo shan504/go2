@@ -10,6 +10,7 @@ from free_space import resample_free, restore_ancestor_free
 from geometry import ObservedGrid, transform_points
 from ground import estimate_ground, ground_alignment
 from map_library import inside, validate_bundle
+from map_start import resolve_start_pose, validate_start_pose
 
 
 def current_settings():
@@ -55,6 +56,7 @@ def build_bundle(root, source, output):
         points, metadata.get('parameters', {}).get('floor_z', -0.30))
     transform, model, body_height = ground_alignment(
         points, ground, metadata.get('body_height_above_ground'))
+    start_pose = validate_start_pose(transform @ resolve_start_pose(root, source))
     aligned_points = transform_points(points, transform)
     grid = ObservedGrid(policy['grid_resolution'])
     grid.free = resample_free(source, ground, transform, grid.resolution,
@@ -78,6 +80,7 @@ def build_bundle(root, source, output):
                                 parameters={**metadata.get('parameters', {}), **policy, 'floor_z':0.},
                                 ground_model=model, source_ground_model=ground,
                                 ground_aligned=True, body_height_above_ground=body_height,
+                                map_start_pose=start_pose.tolist(),
                                 leveled_from=str(source), map_from_previous_map=transform.tolist(),
                                 map_from_source_map=transform.tolist(), point_count=len(points),
                                 initial_pose_reference='z=0: standing body above floor; nonzero z: explicit body height',

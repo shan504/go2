@@ -20,7 +20,7 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header, Bool, Empty, String
 from tf2_ros import TransformBroadcaster,Buffer,TransformListener,TransformException
 from mapper import Mapper,transform_matrix
-from geometry import pose_matrix,quaternion_from_matrix,transform_points,cloud_xyz,planar_pose
+from geometry import pose_matrix,quaternion_from_matrix,transform_points,cloud_xyz,planar_pose,first_map_pose
 from test_3d import room
 # stdlib has an operator module; load our node without shadowing it.
 import importlib.util
@@ -115,7 +115,10 @@ def phase(directory,mode,dense=False,auto=False):
         arguments += ['--params-file',str(single_frame)]
         original_map = (Path(directory)/'latest/map.pcd').read_bytes()
     if auto:
-        arguments += ['-p','auto_initialize:=true','-p','initial_x:=0.0','-p','initial_y:=0.0','-p','initial_yaw_degrees:=0.0']
+        arguments += ['-p','auto_initialize:=true','-p','initial_from_map_start:=false',
+                      '-p','initial_x:=0.0','-p','initial_y:=0.0','-p','initial_yaw_degrees:=0.0']
+    elif mode == 'localization':
+        arguments += ['-p','auto_initialize:=false']
     rclpy.init(args=arguments)
     mapper,operator,sensors = Mapper(),operator_module.Operator(),Sensors()
     map_from_mapping = np.eye(4)
@@ -137,6 +140,8 @@ def phase(directory,mode,dense=False,auto=False):
     try:
         if mode == 'mapping':
             wait_for(lambda: len(mapper.points)>100)
+            first_pose = mapper.mapping_start_pose.copy()
+            np.testing.assert_allclose(first_pose, first_map_pose(sensors.odom), atol=1e-8)
             initial_count = len(mapper.points)
             # A stationary nonrepeating scan must enrich the actual saved map,
             # rather than relying on Foxglove's display decay/accumulation.
@@ -171,6 +176,9 @@ def phase(directory,mode,dense=False,auto=False):
             assert mapper.grid.resolution == mapper.p['grid_resolution'] == 0.10
             assert yaml.safe_load((Path(directory)/'latest/nav.yaml').read_text())['resolution'] == 0.05
             metadata = yaml.safe_load((Path(directory)/'latest/metadata.yaml').read_text())
+            np.testing.assert_allclose(mapper.mapping_start_pose, first_pose, atol=1e-8)
+            np.testing.assert_allclose(metadata['map_start_pose'],
+                                       np.asarray(metadata['map_from_source_map'])@first_pose, atol=1e-8)
             assert metadata['ground_aligned'] and metadata['ground_model']['plane'] == [0.,0.,1.,0.]
             assert 0.1 < metadata['body_height_above_ground'] < 1.0
             selected = (Path(directory)/'latest').resolve()

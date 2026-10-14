@@ -5,7 +5,8 @@ mode="${1:-mapping}"
 profile="${2:-standard}"
 case "$mode" in mapping|localization|navigation) ;; *) echo 'Usage: run.sh mapping [standard|dense] [MAP_NAME] | run.sh [localization|navigation] [standard|dense] [X Y YAW_DEGREES [Z]]' >&2; exit 2 ;; esac
 case "$profile" in standard|dense) ;; *) echo 'Profile must be standard or dense' >&2; exit 2 ;; esac
-auto_initialize=false
+auto_initialize=true
+initial_from_map_start=true
 map_name=default
 initial_x=0.0; initial_y=0.0; initial_yaw=0.0; initial_z=0.0
 if (( $# > 2 )); then
@@ -22,7 +23,7 @@ PY
     [[ $# == 5 || $# == 6 ]] || { echo 'Usage: run.sh navigation dense X Y YAW_DEGREES [Z] (actual map pose)' >&2; exit 2; }
     initial_x="$3"; initial_y="$4"; initial_yaw="$5"; initial_z="${6:-0.0}"
     python3 -c 'import sys,math; assert all(math.isfinite(float(s)) for s in sys.argv[1:]), "Pose must be finite"' "$initial_x" "$initial_y" "$initial_yaw" "$initial_z"
-    auto_initialize=true
+    initial_from_map_start=false
   fi
 fi
 gicp_params=/opt/go2_project/go2_3d/gicp.yaml
@@ -63,6 +64,10 @@ if sudo docker container inspect go2-sdk >/dev/null 2>&1; then
   sudo docker stop --time 10 go2-sdk >/dev/null
 fi
 echo "Starting $mode ($profile); motion disabled. View registered_cloud, map_cloud and camera/image/compressed."
+if [[ "$mode" != mapping && "$initial_from_map_start" == true ]]; then
+  echo 'Automatic localization uses the selected map saved start pose. Place the robot at its mapping start with the same heading; no /initialpose clicks required.'
+  echo 'Wait for accepted GICP localization before enabling motion. Motion stays disabled.'
+fi
 sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --network host \
   -e OMP_NUM_THREADS=2 -e OPENBLAS_NUM_THREADS=1 \
   -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
@@ -71,4 +76,4 @@ sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --
   -v "$project_dir:/opt/go2_project:ro" \
   -v "$project_dir/runtime:/runtime:ro" -v "$project_dir/maps:/maps:rw" \
   --entrypoint /bin/bash go2-3d:edu -c \
-  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7" map_name:="$8"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z" "$map_name"
+  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7" map_name:="$8" initial_from_map_start:="$9"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z" "$map_name" "$initial_from_map_start"

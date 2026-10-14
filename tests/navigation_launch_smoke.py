@@ -51,6 +51,8 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
                     values.update(value)
             assert values['mode'] == ('mapping' if mode == 'mapping' else 'localization')
             assert values['map_directory'] == '/runtime/navigation_map'
+            assert values['auto_initialize'] is True
+            assert values['initial_from_map_start'] is True
             expected_window = 0.0 if mode == 'mapping' and profile == 'standard' else 0.5
             assert values.get('scan_window', 0.0) == expected_window, (mode, profile, values)
             assert values['map_voxel_size'] == (0.02 if profile == 'dense' else 0.06)
@@ -82,12 +84,40 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
                              'localization_min_fitness', 'localization_max_rmse'):
                     actual = probe.declare_parameter(name, 0.0).value
                     assert actual == values.get(name, 0.0), (mode, profile, name, actual)
+                for name in ('auto_initialize','initial_from_map_start'):
+                    assert probe.declare_parameter(name,False).value is True,(mode,profile,name)
             finally:
                 probe.destroy_node()
                 rclpy.shutdown()
                 for path in generated:
                     path.unlink()
             print(f'PASS GICP launch: {mode}/{profile} scan_window={expected_window}; map density and acceptance deadline retained')
+        # Explicit and manual launch options must survive the generated named
+        # node parameter files, including retained-pose restarts away from start.
+        for automatic,from_start in (('true','false'),('false','true')):
+            context.launch_configurations.update(auto_initialize=automatic,initial_from_map_start=from_start,
+                                                 initial_x='1.25',initial_y='-0.4',initial_z='0.37',
+                                                 initial_yaw_degrees='35.0')
+            mapper = mapper_action.execute(context)[0]
+            mapper._perform_substitutions(context)
+            arguments,generated = ['--ros-args'],[]
+            for filename,is_file in mapper._Node__expanded_parameter_arguments:
+                arguments += ['--params-file' if is_file else '-p',filename]
+                if is_file and Path(filename).name.startswith('launch_params_'):
+                    generated.append(Path(filename))
+            rclpy.init(args=arguments)
+            probe = RosNode('go2_gicp')
+            try:
+                assert probe.declare_parameter('auto_initialize',True).value == (automatic=='true')
+                assert probe.declare_parameter('initial_from_map_start',True).value == (from_start=='true')
+                for name,value in (('initial_x',1.25),('initial_y',-0.4),('initial_z',0.37),('initial_yaw_degrees',35.0)):
+                    assert probe.declare_parameter(name,0.0).value == value,(mode,name)
+            finally:
+                probe.destroy_node()
+                rclpy.shutdown()
+                for path in generated:
+                    path.unlink()
+        print(f'PASS initialization launch options: {mode}; selected-map default, explicit pose and manual override')
         group = next(action for action in description.entities if isinstance(action,GroupAction))
         assert group.condition.evaluate(context) == (mode == 'navigation')
         include = next(action for action in group.get_sub_entities()

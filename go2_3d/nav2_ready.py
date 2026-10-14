@@ -4,7 +4,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
-from rclpy.qos import QoSProfile,DurabilityPolicy
+from rclpy.qos import QoSProfile,DurabilityPolicy,qos_profile_sensor_data
 from std_msgs.msg import Bool,String
 from nav2_msgs.srv import ManageLifecycleNodes
 from tf2_ros import Buffer,TransformListener,TransformException
@@ -14,6 +14,7 @@ class Nav2Ready(Node):
     def __init__(self):
         super().__init__('go2_nav2_ready')
         self.valid,self.received,self.ready_since = False,None,None
+        self.localization_status,self.status_received = None,None
         self.attempted,self.started = False,False
         self.wait_reason,self.wait_reported = None,0.0
         self.buffer = Buffer()
@@ -22,6 +23,7 @@ class Nav2Ready(Node):
         self.status = self.create_publisher(String,'/navigation/startup_status',
             QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(Bool,'/localization/valid',self.on_valid,1)
+        self.create_subscription(String,'/localization/status',self.on_localization_status,qos_profile_sensor_data)
         self.create_timer(0.1,self.tick)
         self.report('Waiting for accepted GICP and map TF; Nav2 lifecycle startup deferred')
 
@@ -31,6 +33,26 @@ class Nav2Ready(Node):
 
     def on_valid(self,msg):
         self.valid,self.received = msg.data,time.monotonic()
+
+    def on_localization_status(self,msg):
+        self.localization_status,self.status_received = msg.data,time.monotonic()
+
+    def localization_wait(self,now):
+        if self.received is None:
+            reason,validity = 'localization_missing','/localization/valid: no messages'
+        elif now-self.received >= 0.5:
+            reason = 'localization_stale'
+            validity = f'/localization/valid: stale; last={self.valid} receipt_age={now-self.received:.2f}s'
+        else:
+            reason = 'localization_false'
+            validity = f'/localization/valid={self.valid} receipt_age={now-self.received:.2f}s'
+        if self.status_received is None:
+            detail = '/localization/status: no messages'
+        else:
+            age = now-self.status_received
+            state = 'stale; last reason' if age > 5.0 else 'latest reason'
+            detail = f'/localization/status receipt_age={age:.2f}s; {state}: {self.localization_status}'
+        return reason,f'Nav2 waiting: live accepted GICP localization required; {validity}; {detail}'
 
     def waiting(self,reason,text):
         now = time.monotonic()
@@ -43,7 +65,7 @@ class Nav2Ready(Node):
             return
         now = time.monotonic()
         ready = self.valid and self.received is not None and now-self.received<0.5
-        reason,text = 'localization','Nav2 waiting: live accepted GICP localization required'
+        reason,text = self.localization_wait(now)
         if ready:
             try:
                 pose = self.buffer.lookup_transform('map','base_footprint',Time())

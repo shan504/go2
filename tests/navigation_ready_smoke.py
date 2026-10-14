@@ -10,9 +10,9 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'go2_3d'))
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile,DurabilityPolicy,qos_profile_sensor_data
 from geometry_msgs.msg import TransformStamped
-from std_msgs.msg import Bool,Header
+from std_msgs.msg import Bool,Header,String
 from sensor_msgs.msg import PointCloud2
 from nav2_msgs.srv import ManageLifecycleNodes
 from tf2_ros import TransformBroadcaster
@@ -37,24 +37,32 @@ with tempfile.TemporaryDirectory() as tmp:
         parameters=dict(obstacle_min_height=0.10,obstacle_max_height=1.5))))
     rclpy.init(args=['--ros-args','-p',f'map_directory:={tmp}'])
     gate,obstacles,source = Nav2Ready(),ObstacleCloud(),Node('test_nav2_sensors')
-    calls,packets = [],[]
+    calls,packets,startup_statuses = [],[],[]
     def startup(request,response):
         calls.append(request.command)
         response.success = True
         return response
     service = source.create_service(ManageLifecycleNodes,'/lifecycle_manager_navigation/manage_nodes',startup)
     valid = source.create_publisher(Bool,'/localization/valid',1)
+    localization_status = source.create_publisher(String,'/localization/status',qos_profile_sensor_data)
+    source.create_subscription(String,'/navigation/startup_status',
+        lambda message: startup_statuses.append(message.data),
+        QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL))
     cloud = source.create_publisher(PointCloud2,'/point_cloud2',qos_profile_sensor_data)
     source.create_subscription(PointCloud2,'/navigation/obstacle_cloud',packets.append,qos_profile_sensor_data)
     broadcaster = TransformBroadcaster(source)
-    state = dict(valid=False,tf=False)
+    state = dict(valid=False,publish_valid=False,tf=False,status=None,status_samples=0)
     # A rolled standing body makes a fixed body-z slice disagree with ground.
     matrix = pose_matrix([0,0,0],[np.sin(0.2/2),0,0,np.cos(0.2/2)])
     world_points = np.array([[1,1,-0.46],[1,1,-0.36],[1,1,0.30],[1,1,1.5]])
     body_points = transform_points(world_points,np.linalg.inv(matrix))
     def emit():
         stamp = source.get_clock().now().to_msg()
-        valid.publish(Bool(data=state['valid']))
+        if state['publish_valid']:
+            valid.publish(Bool(data=state['valid']))
+        if state['status'] is not None:
+            state['status_samples'] += 1
+            localization_status.publish(String(data=state['status']+f'; cloud_samples={state["status_samples"]}'))
         if state['tf']:
             tf = TransformStamped(header=Header(stamp=stamp,frame_id='map'),child_frame_id='base_link')
             q = quaternion_from_matrix(matrix)
@@ -73,12 +81,37 @@ with tempfile.TemporaryDirectory() as tmp:
         executor.add_node(node)
     thread = threading.Thread(target=executor.spin,daemon=True);thread.start()
     try:
-        time.sleep(0.8)
+        wait(lambda: any('/localization/valid: no messages' in text and
+                         '/localization/status: no messages' in text for text in startup_statuses))
         assert not calls and not packets,'Unlocalized startup/filter was allowed'
+        state['publish_valid'] = True
+        for detail in ('Waiting for actual initial map pose; Nav2 startup deferred',
+                       'Waiting for fresh cloud and timestamped odometry',
+                       'Localization invalid: overlap/residual rejected: fitness=0.100 rmse=0.240'):
+            state['status'] = detail
+            wait(lambda: any(detail in text and '/localization/valid=False receipt_age=' in text and
+                             '/localization/status receipt_age=' in text for text in startup_statuses))
+            assert not calls and not packets,'Mapper wait/rejection status bypassed localization'
+        # Changing mapper counters must not turn every sensor packet into a log.
+        reports = len(startup_statuses)
+        time.sleep(0.4)
+        assert len(startup_statuses)-reports <= 1,'Mapper counter noise flooded startup diagnostics'
         state['valid'] = True
         time.sleep(0.8)
         assert not calls and not packets,'A true flag without map TF started navigation'
+        # Fresh TF and a successful status string cannot authorize an old Bool.
+        state['publish_valid'] = False
+        time.sleep(0.6)
         state['tf'] = True
+        state['status'] = 'GICP fitness=0.999 rmse=0.001'
+        wait(lambda: any('/localization/valid: stale; last=True receipt_age=' in text and
+                         'GICP fitness=0.999' in text for text in startup_statuses))
+        assert not calls,'Stale validity or informational status started Nav2'
+        state['status'] = None
+        wait(lambda: any('/localization/status receipt_age=' in text and
+                         'stale; last reason: GICP fitness=0.999' in text for text in startup_statuses),seconds=12)
+        assert not calls,'Stale mapper status started Nav2'
+        state['publish_valid'] = True
         wait(lambda: len(calls)==1 and gate.started and len(packets)>0)
         assert calls == [ManageLifecycleNodes.Request.STARTUP]
         decoded = cloud_xyz(packets[-1])
@@ -93,6 +126,7 @@ with tempfile.TemporaryDirectory() as tmp:
         time.sleep(0.3)
         assert len(packets)==count,'Invalid localization kept publishing obstacle packets'
         print('PASS ROS Nav2 startup: no startup without GICP+TF; exactly one startup when ready')
+        print('PASS ROS startup diagnostics: initialpose/cloud/GICP reasons forwarded; missing/stale status and validity distinguished; counter noise throttled')
         print('PASS ROS ground obstacles: body roll + floor removal + true obstacle retention + invalidity stops')
     finally:
         executor.shutdown();thread.join(timeout=3)

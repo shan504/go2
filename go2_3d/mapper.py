@@ -26,6 +26,9 @@ from ros_cloud import xyz_message
 from ground import estimate_ground,body_seed_position
 from denoise import clean_directory
 from navigation_grid import build_bundle
+from map_start import start_pose_from_metadata
+
+INITIAL_POSE_WAIT_SECONDS = 10.0
 
 
 def transform_matrix(transform):
@@ -59,7 +62,7 @@ class Mapper(Node):
                         localization_voxel_size=0.10, localization_correspondence=0.30,
                         localization_min_fitness=0.30, localization_max_rmse=0.15,
                         stationary_translation_limit=0.25, stationary_rotation_limit_degrees=8.0,
-                        correction_alpha=0.25,auto_initialize=False,
+                        correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
                         initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -91,24 +94,31 @@ class Mapper(Node):
         self.accepted_match_correction = None
         self.last_tf_stamp = None
         self.initial_hint_used = False
+        self.pending_initial_pose = None
         self.waiting_status_time = 0.0
         self.last_failure = ''
         self.last_keyframe = None
         self.last_keyframe_time = None
+        self.mapping_start_pose = None
         self.points = np.empty((0,3))
         self.registration_points = np.empty((0,3))
         self.localization_points = np.empty((0,3))
         self.grid = ObservedGrid(self.p['grid_resolution'])
         self.map_metadata = {}
+        self.saved_start_pose = None
         if self.p['mode'] == 'localization':
             directory = Path(self.p['map_directory'])
             self.map_metadata = yaml.safe_load((directory/'metadata.yaml').read_text())
+            if self.p['auto_initialize'] and self.p['initial_from_map_start']:
+                self.saved_start_pose = start_pose_from_metadata(self.map_metadata)
             self.points = np.asarray(o3d.io.read_point_cloud(str(directory/'map.pcd')).points).copy()
             if len(self.points) < 100:
                 raise ValueError('Missing/empty 3D map.pcd; localization cannot start')
             self.registration_points = np.asarray(cloud(self.points,self.p['voxel_size']).points).copy()
             self.localization_points = np.asarray(cloud(self.points,self.p['localization_voxel_size']).points).copy()
-            self.get_logger().info('Loaded 3D map; waiting for /initialpose in map frame')
+            self.get_logger().info('Loaded 3D map; automatic initialization from saved mapping start'
+                                   if self.p['auto_initialize'] and self.p['initial_from_map_start'] else
+                                   'Loaded 3D map; waiting for configured or manual /initialpose')
         self.buffer = Buffer()
         self.listener = TransformListener(self.buffer, self)
         self.broadcaster = TransformBroadcaster(self)
@@ -206,43 +216,81 @@ class Mapper(Node):
                 self.history.append(self.latest)
                 self.cloud_counts['aligned'] += 1
                 self.cloud_status = 'cloud aligned with timestamped odometry'
-        if (self.latest is not None and self.p['mode'] == 'localization' and self.p['auto_initialize'] and
-                not self.initial_hint_used):
-            hint = PoseWithCovarianceStamped()
-            hint.header.frame_id = 'map'
-            p,q = hint.pose.pose.position,hint.pose.pose.orientation
-            p.x,p.y,p.z = self.p['initial_x'],self.p['initial_y'],self.p['initial_z']
-            angle = np.deg2rad(self.p['initial_yaw_degrees'])/2
-            q.z,q.w = float(np.sin(angle)),float(np.cos(angle))
-            self.initial_pose(hint)
-            self.initial_hint_used = self.initialized
+        self.apply_pending_initial_pose()
+        with self.lock:
+            if (self.latest is not None and self.p['mode'] == 'localization' and self.p['auto_initialize'] and
+                    not self.initial_hint_used):
+                hint = PoseWithCovarianceStamped()
+                hint.header.frame_id = 'map'
+                p,q = hint.pose.pose.position,hint.pose.pose.orientation
+                if self.p['initial_from_map_start']:
+                    start = self.saved_start_pose
+                    p.x,p.y,p.z = map(float, start[:3,3])
+                    q.x,q.y,q.z,q.w = map(float, quaternion_from_matrix(start))
+                    self.seed_initial_pose(hint, exact_body_pose=True)
+                else:
+                    p.x,p.y,p.z = self.p['initial_x'],self.p['initial_y'],self.p['initial_z']
+                    angle = np.deg2rad(self.p['initial_yaw_degrees'])/2
+                    q.z,q.w = float(np.sin(angle)),float(np.cos(angle))
+                    self.initial_pose(hint)
 
     def initial_pose(self, message):
+        self.seed_initial_pose(message)
+
+    def seed_initial_pose(self, message, exact_body_pose=False):
         if self.p['mode'] != 'localization' or message.header.frame_id != 'map':
             self.get_logger().warning('/initialpose is supported only in localization, frame map')
             return
         with self.lock:
-            if self.latest is None or time.monotonic()-self.latest[2] > 1.0:
-                self.get_logger().warning('Need fresh cloud and timestamp-aligned odometry before initialpose')
-                return
             pose = message.pose.pose
             try:
-                position = body_seed_position([pose.position.x,pose.position.y,pose.position.z],
-                                             self.map_metadata.get('ground_model'),
-                                             self.map_metadata.get('body_height_above_ground'))
+                position = [pose.position.x,pose.position.y,pose.position.z]
+                if not exact_body_pose:
+                    position = body_seed_position(position, self.map_metadata.get('ground_model'),
+                                                  self.map_metadata.get('body_height_above_ground'))
                 map_base = pose_matrix(position,
                                        [pose.orientation.x,pose.orientation.y,pose.orientation.z,pose.orientation.w])
             except ValueError as error:
                 self.get_logger().error(str(error))
                 return
-            self.correction = map_base @ np.linalg.inv(self.latest[1])
-            self.initialized, self.seeded = True, False
+            # A browser hint can arrive before the first timestamp-aligned
+            # sensor packet. Keep the newest valid user hint, never replace
+            # it with the CLI fallback or continue publishing an old match.
+            self.pending_initial_pose = (map_base, time.monotonic())
+            self.initial_hint_used = True
+            self.initialized, self.seeded = False, False
             self.last_accepted = None
             self.accepted_odom = None
             self.accepted_match_correction = None
             self.processed_stamp = None
+            self.last_failure = ''
             self.generation += 1
-        self.report('Initial-pose seed received; waiting for accepted GICP match')
+        if not self.apply_pending_initial_pose():
+            self.report(f'Initial-pose hint queued for up to {INITIAL_POSE_WAIT_SECONDS:.0f}s; '
+                        'waiting for fresh cloud and timestamp-aligned odometry; keep robot stationary')
+
+    def apply_pending_initial_pose(self):
+        with self.lock:
+            if self.pending_initial_pose is None:
+                return False
+            map_base, received = self.pending_initial_pose
+            now = time.monotonic()
+            if now-received > INITIAL_POSE_WAIT_SECONDS:
+                self.pending_initial_pose = None
+                self.last_failure = 'Initial-pose hint expired before fresh cloud/odometry; publish actual /initialpose again'
+                text = self.last_failure
+            elif self.latest is None or not 0 <= now-self.latest[2] <= 1.0:
+                return False
+            else:
+                age = (self.get_clock().now()-Time.from_msg(self.latest[0].header.stamp)).nanoseconds/1e9
+                if not -0.1 <= age <= 1.0:
+                    return False
+                self.correction = map_base @ np.linalg.inv(self.latest[1])
+                self.initialized = True
+                self.pending_initial_pose = None
+                text = 'Initial-pose seed received; waiting for accepted GICP match'
+        self.report(text)
+        return self.initialized
 
     def process(self):
         started = time.monotonic()
@@ -394,6 +442,8 @@ class Mapper(Node):
                             raise ValueError('Map point budget reached; save map and begin localization')
                         self.grid.observe(new,matched[:3,3])
                         self.points, self.last_keyframe = combined, matched.copy()
+                        if self.mapping_start_pose is None:
+                            self.mapping_start_pose = matched.copy()
                         self.registration_points = np.asarray(cloud(combined,self.p['voxel_size']).points).copy()
                         self.last_keyframe_time = now
                 self.last_accepted = source_received
@@ -426,8 +476,14 @@ class Mapper(Node):
             valid = (self.p['mode'] == 'localization' and self.last_accepted is not None and
                      time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
             if self.p['mode']=='localization' and not self.initialized and time.monotonic()-self.waiting_status_time>2:
-                text = ('Waiting for fresh cloud and timestamped odometry' if self.latest is None else
-                        'Waiting for actual initial map pose; Nav2 startup deferred')
+                if self.pending_initial_pose is not None:
+                    text = 'Initial-pose hint queued; waiting for fresh cloud and timestamped odometry'
+                elif self.last_failure:
+                    text = self.last_failure
+                else:
+                    text = ('Waiting for fresh cloud and timestamped odometry' if self.latest is None else
+                            'Waiting for actual /initialpose in map; publish robot position and heading; Nav2 startup deferred')
+                text += f'; {self.cloud_status}; {self.cloud_diagnostics()}'
                 self.status_pub.publish(String(data=text))
                 self.waiting_status_time = time.monotonic()
             elif self.p['mode']=='localization' and not valid and time.monotonic()-self.waiting_status_time>2:
@@ -484,6 +540,7 @@ class Mapper(Node):
             return response
         with self.lock:
             points, free = self.points.copy(), self.grid.free.copy()
+            start_pose = self.mapping_start_pose.copy() if self.mapping_start_pose is not None else np.eye(4)
         if len(points) < 100:
             response.success, response.message = False, 'No usable 3D map yet'
             return response
@@ -499,6 +556,7 @@ class Mapper(Node):
             grid.export(points,directory,self.p['floor_z'],self.p['obstacle_min_height'],self.p['obstacle_max_height'],ground)
             denoise_report = clean_directory(directory)
             (directory/'metadata.yaml').write_text(yaml.safe_dump(dict(frame_id='map',parameters=self.p,
+                map_start_pose=start_pose.tolist(),
                 ground_model=ground,navigation_denoise=denoise_report,
                 map_type='incremental GICP scan-to-map; no loop closure',point_count=len(points))))
             # Raw observations remain as a retained version. Publish only

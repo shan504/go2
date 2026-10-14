@@ -48,8 +48,8 @@
 和 `uslam` 点云/里程计；话题存在不等于有数据，也不能直接假定其坐标系与本地图一致。
 截图无法确定抖动原因，不应靠延长衰减时间掩盖位姿跳动。
 
-定位刚启动但尚未设置初始位姿时，`map → odom` 不存在；可暂时选 `odom` 查看实时点云，
-地图仍在 `map` 下。设置位姿并匹配通过后切回 `map`。不要添加固定的 `map → odom` 来掩盖问题。
+定位刚启动、GICP尚未接受匹配时，`map → odom` 不存在；可暂时选 `odom` 查看实时点云，
+地图仍在 `map` 下。匹配通过后切回 `map`。不要添加固定的 `map → odom` 来掩盖问题。
 
 相机使用官方 GetImageSample，最高约 2 Hz。只有日志出现
 `First camera sample published` 且图像实际刷新才算接通。RPC 超时或非零状态码需要检查固件接口，
@@ -98,8 +98,11 @@ SSH 启动 `bash go2_3d/run.sh mapping` 后，静置等待 `/map_cloud`，再用
 一起刚体对齐地面，地面 `z=0`，栅格默认5厘米。定位、Nav2及实时障碍使用同一坐标。
 旧图、新图和只定位模式都自动应用这一公共流程，运动默认关闭；原始文件和历史版本保留。
 使用稠密扫描窗口时执行 `bash go2_3d/run.sh navigation dense`；不会改变已经保存的 PCD 分辨率。
+把机器狗放在所选地图的建图起点、同一朝向，直接启动即可自动初始化，无需点击 `/initialpose`。
+程序使用该图保存的起点及公共坐标变换，适用于所有新图、旧图和保留版本。
+等待 `/localization/valid=true`、GICP匹配通过后再选航点并启用运动；初始化不会自动运动。
 
-在 3D 面板的齿轮设置中，向下找到“发布 / Publish”分组（不是“主题”中的 `/initialpose`）：
+从其他位置启动或需重定位时，可手动设置实际位姿。在3D面板齿轮设置中找到“发布 / Publish”分组：
 
 1. 类型选择“位姿估计 / Pose estimate”，话题填写 `/initialpose`。
 2. 显示参考系设为 `map`，用右侧 `3D` 按钮切换到俯视视图，方便选取 XY 位置。
@@ -142,12 +145,12 @@ scp unitree@192.168.123.18:/home/unitree/go2_nav/docs/foxglove_go2_navigation.js
 
 在 Foxglove 顶部布局菜单选择从文件导入，再连接 `ws://192.168.123.18:8765`。
 导入只恢复显示和工具设置，不发布初始位姿。若日志最后出现 `user interrupted with ctrl-c`，
-先在第一个 SSH 终端重新运行 `bash ~/go2_nav/go2_3d/run.sh navigation dense` 并保持运行，
-再从第二个 SSH 终端或 3D 面板设置当前真实初始位姿。
-`Invalid frame ID "map"` 是 TF 不可用，需要检查 GICP 是否收到初始位姿并通过匹配；
-仅加载地图或导入布局不会建立 `map → odom`。
+把机器狗放回该图建图起点、同一朝向，在第一个SSH终端运行 `bash ~/go2_nav/go2_3d/run.sh navigation dense` 并保持运行。
+从其他位置启动时才需实际数值位姿或手动重定位。
+`Invalid frame ID "map"` 是TF不可用，需要检查自动初始化、传感器与GICP匹配原因；
+只有GICP接受匹配后才建立 `map → odom`。
 
-初始位姿示例（只有回到建图起点、同一朝向时才适用）：
+手动初始位姿格式示例（坐标须替换为机器狗在当前地图中的真实位姿）：
 
 ```json
 {
@@ -159,8 +162,8 @@ scp unitree@192.168.123.18:/home/unitree/go2_nav/docs/foxglove_go2_navigation.js
 }
 ```
 
-也可通过第二个 SSH 终端初始化。先保持机器人静止，运动关闭；**以下零位姿仅适用于
-回到建图起点、同一朝向及站立高度的情况**：
+也可通过第二个SSH终端手动重定位。先保持机器人静止、运动关闭；
+下方零坐标只适用于当前地图中实际位于零坐标、零朝向的位置，不能代替该图保存的建图起点：
 
 ```bash
 bash ~/go2_nav/go2_3d/tools.sh shell
@@ -170,15 +173,18 @@ ros2 topic echo /localization/valid
 
 最后一条会持续显示定位有效性，按 Ctrl+C 结束观察，输入 `exit` 返回宿主机。
 初始位姿是近似提示；日志收到 seed 不代表已经定位成功，必须等 GICP 匹配通过。
-上述零位姿同样适用于已经 `level-map` 的地图：程序补入高度，再由 GICP 求真实六自由度机身位姿。
+二维位姿z=0会补入该图站立高度，再由GICP求真实六自由度机身位姿。
 若机器人在其他位置，应填写其真实地图位置及朝向，不能照用零位姿。
-**每次重新运行 `run.sh navigation dense` 都需要重新设置初始位姿**，保存的地图不会自动
-恢复机器狗当前位姿。启动终端要保持运行，在第二个 SSH 终端初始化和检查。
-也可直接运行 `bash go2_3d/run.sh navigation dense X Y YAW_DEGREES [Z]`，
-让程序在收到新鲜点云和里程计后发布一次这个实际位姿提示；仍须通过 GICP。
+每次运行 `run.sh navigation dense` 都默认从所选地图的建图起点自动初始化，启动终端保持运行。
+从其他位置启动可运行 `bash go2_3d/run.sh navigation dense X Y YAW_DEGREES [Z]`，
+显式实际坐标会覆盖起点提示；收到新鲜点云和里程计后初始化，仍须通过GICP。
+直接ROS launch可设 `auto_initialize:=false` 使用手动 `/initialpose`；显式数值位姿需设 `initial_from_map_start:=false`。
 `level-map` 后省略 Z 或设为 0 表示使用保存的站立高度；显式非零 Z 表示机身在新 map 中的高度。
-零位姿只用于实际回到建图起点、同朝向和高度。程序不会猜测机器狗已回到起点。
 Nav2 保持未激活，直到 GICP 与新鲜 TF 就绪；查看 `/navigation/startup_status`。
+未填写启动位姿时，启动终端提示使用所选地图建图起点。地图加载、航点编号及“启用运动”都不代替GICP接受检查。
+等待提示现在附上 `/localization/valid` 是缺消息、为false还是已过期，及最近的 `/localization/status` 原因与接收年龄。
+手动模式的 `Waiting for actual initial map pose` 表示尚需实际初始位姿；等待点云/时间戳里程计或GICP拒绝时，
+先查看对应原因再处理。缺失或过期的状态会明确标注，旧的成功文字不能使Nav2启动。
 启动终端按 Ctrl+C 会关闭整个栈并删除 `go2-3d` 容器；此后 `tools.sh` 会报容器不存在。
 
 没有 `map → odom` 时，全局代价地图会等待 `base_link → map`，局部代价地图也不能
@@ -286,7 +292,7 @@ Ctrl+C 也发送 Stop，输出保存到 `runtime/drive-debug.txt`。
 四足 Go2 若两条接口均只探身，可按 README 执行 `tools.sh drivecheck-balanced`：
 显式做一次 BalanceStand1002，等待匹配成功后再运行原速度的两秒 Sport 测试。
 这只验证站立准备假设，不自动加入正常导航；记录保存为 `runtime/balanced-drive-debug.txt`。
-若重启后一直等待 `base_link → map`，先重新初始化 GICP；
+若重启后一直等待 `base_link → map`，查看 `/localization/status` 的初始化、点云或匹配原因；
 Ctrl+C 后的 ROS context invalid 错误属于关闭阶段，不能据此判断运动桥故障。
 
 ## 代价地图与规划失败

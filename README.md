@@ -37,7 +37,7 @@ bash go2_3d/run.sh mapping
 粗栅格转细栅格保留已知自由面积，旧版调平图也会恢复保留祖先中的自由区域。
 原始PCD与历史版本保留。已经对齐的图重复加载不会再次移动坐标；旧图自动在运行副本中对齐，
 无需逐张执行 `level-map`、修复或清理命令。
-首次更新后重新初始化位姿，并在对齐后的地图中重新选点；旧坐标中的目标不直接沿用。
+启动前回到所选地图的建图起点、同一朝向，程序自动初始化；在对齐后的地图中重新选点。
 后续修改必须遵守仓库 [AGENTS.md](AGENTS.md) 中对所有地图全局生效的要求。
 
 在机器狗电脑更新后，停止当前启动终端，按原命令重新启动即可：
@@ -48,7 +48,8 @@ git pull --ff-only
 bash go2_3d/run.sh navigation dense
 ```
 
-重新初始化在所选地图中的实际位姿，选点后再启用运动。缺少所需 Nav2 插件时，
+机器狗放在所选地图的建图起点、同一朝向后直接启动，无需点击 `/initialpose`；
+等待GICP定位有效，选点后再启用运动。缺少所需 Nav2 插件时，
 仍按启动提示执行 `bash go2_3d/build.sh`；已具备插件的镜像无需为更换地图重建。
 
 ## 三维地图与定位链路
@@ -75,8 +76,9 @@ bash go2_3d/run.sh navigation dense
 这是增量三维 scan-to-map 建图，**没有闭环优化**，较大场地可能累积漂移。
 原生点云的运动畸变补偿、里程计质量仍取决于机器狗输出。
 
-定位加载三维 PCD；在已知大致位置发布 `/initialpose` 后做 GICP 精配准。
-重定位同样重新设置初始位姿；不提供无初始位置的自动全局搜索。
+定位加载三维 PCD，默认以所选地图保存的建图起点自动初始化，再做GICP精配准。
+所有地图、新图和保留版本共用这一流程；请把机器狗放回该图起点、同一朝向。
+从其他位置启动可传入实际 `X Y YAW_DEGREES [Z]`，或使用 `/initialpose` 重定位。
 `map → odom = map → base_link × inverse(odom → base_link)`，不会同时启动 AMCL 或 slam_toolbox。
 
 ## 在 Foxglove 操作
@@ -88,7 +90,7 @@ bash go2_3d/run.sh navigation dense
 - 固定/显示参考系均为 `map`，网格 `Z 向上`；配准点云与地图按 `z` 高度着色。
 - 前置相机：`/camera/image/compressed`，替换旧 `/robot0/camera/image_raw`。
 - 发布 `/mapping/save` 保存三维地图和 Nav2 栅格。
-- 设置 `/initialpose`；点选 `/goal_pose` 在运动禁用时暂存，启用确认后转换成 Nav2 `NavigateToPose` action。
+- 起点自动初始化后点选 `/goal_pose` 收集航点，启用确认后转换成 Nav2 `NavigateToPose` action；其他位置可用 `/initialpose` 重定位。
 - 发布 `/control/enable` 启用或停止运动；`/navigation/cancel` 取消导航。
 - 查看 `/localization/status`、`/localization/valid`、`/operator/status`、`/control/status`。
 
@@ -131,11 +133,13 @@ bash go2_3d/run.sh localization
 bash go2_3d/run.sh navigation
 # 加载稠密保存的地图；用最近0.5秒扫描累积定位
 bash go2_3d/run.sh navigation dense
-# 若实际回到建图起点、同一朝向和高度，可在启动命令中给初始位姿
-bash go2_3d/run.sh navigation dense 0 0 0
+# 从其他位置启动时，传入该图中的实际位置、朝向和可选机身高度
+bash go2_3d/run.sh navigation dense X Y YAW_DEGREES [Z]
 ```
 
-数值参数为 `X Y YAW_DEGREES [Z]`，单位米、度；只提供提示，不会跳过 GICP 接受检查。
+不传数值参数时自动使用所选地图的建图起点，无需 `/initialpose`；单位米、度的显式数值参数覆盖起点。
+初始化只提供提示，不会跳过GICP接受检查或自动启用运动。
+直接ROS launch可设 `auto_initialize:=false` 改为手动初始化；显式坐标使用 `initial_from_map_start:=false`。
 Nav2 生命周期启动等待 GICP 连续有效和新鲜 `map → base_footprint`，不再提前激活并反复等待不存在的 map。
 `/navigation/startup_status` 显示等待、启动或失败原因。默认运动仍关闭。
 定位有效但代价地图/速度均无发布者时，先检查 Nav2 启动状态，而非继续点击启用。
@@ -191,7 +195,7 @@ bash ~/go2_nav/go2_3d/tools.sh save
 
 ```bash
 cd ~/go2_nav
-bash go2_3d/run.sh navigation dense 0 0 0
+bash go2_3d/run.sh navigation dense
 ```
 
 上述流程在保存和加载时自动应用公共地面对齐与导航修复，不需要先处理每张地图。
@@ -222,7 +226,7 @@ Nav2 使用动态 `base_footprint`：投影到 map 栅格的 XY 平面，保留�
 目标若位于地图障碍、未知空间或代价地图净空不足处，会在 `/operator/status` 明确拒绝。
 已验证的目标以固定 map 位姿发送，不携带历史机身时间；规划失败直接结束，不自动转圈/倒退。
 
-**首次启动和模式切换目前通过 SSH；显示、保存、定位初始化、导航目标与运动开关通过 Foxglove。**
+**首次启动和模式切换通过SSH，建图起点自动初始化；显示、保存、重定位、导航目标与运动开关通过Foxglove。**
 
 ## 多点导航与室内、农场地图保存
 
@@ -279,7 +283,8 @@ bash go2_3d/tools.sh use-map indoor
 bash go2_3d/run.sh navigation dense
 ```
 
-切图必须重新在该图的实际位置初始化 `/initialpose`，确认定位后再选路线；农场坐标不能当成室内坐标。
+切图后把机器狗放回该图的建图起点、同一朝向，启动即自动初始化，确认定位后再选路线。
+其他位置使用该图实际坐标或 `/initialpose`；农场坐标不能当成室内坐标。
 `use-map farm` 切回农场，`use-map indoor 版本目录名` 可选择历史版本。
 容器运行时禁止切图，归档允许运行中执行。地图清理、修复、调平也生成同名地图的新版本，保留前版。
 
@@ -621,7 +626,7 @@ bash go2_3d/run.sh navigation dense
 上面的 `clean-map` 仅在需要保存独立清理版本时执行；它保留原 PCD、地图坐标、站立高度及原目录。
 新建地图保存、地面对齐、栅格修复时也自动应用相同静态过滤。
 启动会先检查当前镜像是否含 `DenoiseLayer`；若提示缺失，执行 `bash go2_3d/build.sh` 更新镜像。
-重新初始化 GICP、确认定位有效，再启用运动并**重新发送目标**；旧失败目标不会因启用按钮而重试。
+在该图起点自动初始化GICP、确认定位有效，再启用运动并**重新发送目标**；旧失败目标不会因启用按钮而重试。
 
 验证直接编译上游未修改的 Humble 去噪算法及 NavFn 核心：同一 0.6 米通道，
 去噪前 0 步路径，去噪后 98 步；连续墙体与更大障碍仍阻断路径，未知格保持原样。
