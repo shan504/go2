@@ -71,8 +71,12 @@ class Nav2Ready(Node):
                 pose = self.buffer.lookup_transform('map','base_footprint',Time())
                 stamp = Time.from_msg(pose.header.stamp)
                 age = (self.get_clock().now()-stamp).nanoseconds/1e9
-                ready = 0 <= age<0.3
-                reason,text = 'tf_age',f'Nav2 waiting: map -> base_footprint TF age={age:.3f}s; requires 0..0.3s'
+                # Match the existing 100ms future tolerance used by Mapper,
+                # goal validation and pose capture. Small sensor/host skew
+                # must not reset every 0.5s settling interval. Keep the
+                # original 300ms stale limit and the real sensor timestamp.
+                ready = -0.1 <= age<0.3
+                reason,text = 'tf_age',f'Nav2 waiting: map -> base_footprint TF age={age:.3f}s; requires -0.1..0.3s'
             except TransformException as error:
                 ready = False
                 reason,text = 'tf_missing',f'Nav2 waiting: map -> base_footprint TF unavailable: {error}'

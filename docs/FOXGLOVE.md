@@ -181,6 +181,8 @@ ros2 topic echo /localization/valid
 直接ROS launch可设 `auto_initialize:=false` 使用手动 `/initialpose`；显式数值位姿需设 `initial_from_map_start:=false`。
 `level-map` 后省略 Z 或设为 0 表示使用保存的站立高度；显式非零 Z 表示机身在新 map 中的高度。
 Nav2 保持未激活，直到 GICP 与新鲜 TF 就绪；查看 `/navigation/startup_status`。
+若TF年龄为-0.005～-0.021秒，这是设备时间略超前；公共启动检查允许最多100毫秒超前，
+保持原300毫秒过期限制和连续0.5秒就绪检查。该规则对所有地图生效，不修改点云或TF原始时间戳。
 未填写启动位姿时，启动终端提示使用所选地图建图起点。地图加载、航点编号及“启用运动”都不代替GICP接受检查。
 等待提示现在附上 `/localization/valid` 是缺消息、为false还是已过期，及最近的 `/localization/status` 原因与接收年龄。
 手动模式的 `Waiting for actual initial map pose` 表示尚需实际初始位姿；等待点云/时间戳里程计或GICP拒绝时，

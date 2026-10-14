@@ -142,6 +142,8 @@ bash go2_3d/run.sh navigation dense X Y YAW_DEGREES [Z]
 初始化只提供提示，不会跳过GICP接受检查或自动启用运动。
 直接ROS launch可设 `auto_initialize:=false` 改为手动初始化；显式坐标使用 `initial_from_map_start:=false`。
 Nav2 生命周期启动等待 GICP 连续有效和新鲜 `map → base_footprint`，不再提前激活并反复等待不存在的 map。
+公共启动检查允许与定位相同的最多100毫秒TF时间超前，仍拒绝300毫秒以上的旧TF，
+避免毫秒级设备/主机偏差反复清空连续0.5秒就绪计时。该规则适用于所有地图，不改传感器时间戳。
 `/navigation/startup_status` 显示等待、启动或失败原因。默认运动仍关闭。
 定位有效但代价地图/速度均无发布者时，先检查 Nav2 启动状态，而非继续点击启用。
 `tools.sh navcheck X Y` 直接读取七个 Nav2 生命周期服务及启动状态，绕过 ROS CLI daemon；
