@@ -194,6 +194,8 @@ class GicpEndpoints(Node):
     def __init__(self):
         super().__init__('go2_gicp')
         values = dict(scan_window=0.5, registration_period=0.5, validity_timeout=1.0,
+                      localization_hold_timeout=3.0, localization_hold_distance=1.0,
+                      localization_hold_rotation_degrees=60.0, localization_odom_timeout=0.3,
                       voxel_size=0.15, localization_voxel_size=0.10,
                       localization_correspondence=0.30, submap_radius=25.0,
                       localization_max_translation=0.80, localization_max_rotation_degrees=35.0,

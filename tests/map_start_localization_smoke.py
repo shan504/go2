@@ -78,7 +78,7 @@ def check(directory, truth, automatic=True):
         np.testing.assert_allclose(footprint, planar_pose(truth), atol=0.025)
         assert abs(footprint[2, 3]) < 0.003
         assert sensors.lifecycle_calls == [ManageLifecycleNodes.Request.STARTUP]
-        assert mapper.p['localization_min_fitness'] == 0.30 and mapper.p['localization_max_rmse'] == 0.15
+        assert mapper.p['localization_min_fitness'] == 0.20 and mapper.p['localization_max_rmse'] == 0.20
         assert mapper.p['validity_timeout'] == 1.0
         print(f'PASS {directory.name}: {"automatic saved-start" if automatic else "explicit manual mode"}; '
               'cloud-before-TF, real accepted fine GICP, full body/ground footprint and gated lifecycle', flush=True)

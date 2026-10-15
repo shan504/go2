@@ -28,6 +28,9 @@ class Operator(Node):
         self.mode = self.get_parameter('mode').value
         self.valid = False
         self.valid_received = None
+        self.localization_state = 'state not received'
+        self.localization_state_received = None
+        self.localization_pause_detail = ''
         self.goal_handle = None
         self.goal_pending = False
         self.cancel_requested = False
@@ -67,6 +70,7 @@ class Operator(Node):
                 self.create_subscription(OccupancyGrid,topic,
                     lambda msg,topic=topic: self.grids.__setitem__(topic,(msg,time.monotonic())),retained)
         self.create_subscription(Bool,'/localization/valid',self.on_validity,1)
+        self.create_subscription(String,'/localization/state',self.on_localization_state,1)
         self.create_subscription(Empty,'/mapping/save',self.on_save,1)
         self.create_subscription(Bool,'/control/enable',self.on_enable,1)
         self.create_subscription(Empty,'/navigation/cancel',self.on_cancel,1)
@@ -127,6 +131,17 @@ class Operator(Node):
     def on_validity(self,message):
         self.valid, self.valid_received = message.data,time.monotonic()
 
+    def on_localization_state(self, message):
+        self.localization_state, self.localization_state_received = message.data, time.monotonic()
+
+    def localization_loss_detail(self):
+        now = time.monotonic()
+        age = now-self.valid_received if self.valid_received is not None else float('inf')
+        reason = 'localization_heartbeat_timeout' if not 0 <= age < 0.5 else 'localization_reported_invalid'
+        state_age = now-self.localization_state_received if self.localization_state_received is not None else float('inf')
+        return (f'reason={reason} validity_age={age:.2f}s; latest_state_age={state_age:.2f}s '
+                f'latest_mapper_{self.localization_state}')
+
     def watchdog(self):
         if not self.localized() and (self.goal_handle is not None or self.goal_pending or self.waiting_goal is not None):
             if not self.route_paused:
@@ -145,6 +160,7 @@ class Operator(Node):
         self.route_started = False
         self.route_paused = True
         self.route_pause_reason = 'localization'
+        self.localization_pause_detail = self.localization_loss_detail()
         if self.inflight_waypoint is not None:
             self.waypoints.appendleft(self.inflight_waypoint)
             self.inflight_waypoint = None
@@ -175,7 +191,8 @@ class Operator(Node):
                     self.report(f'Route paused; motion bridge disable failed: {error}; action cancellation requested')
             future.add_done_callback(disabled)
         self.cancel_active_goal()
-        self.report('Route paused: live localization lost; waypoints retained; enable motion after localization recovers')
+        self.report('Route paused: live localization lost; '+self.localization_pause_detail+
+                    '; waypoints retained; enable motion after localization recovers')
 
     def on_save(self,message):
         if self.mode != 'mapping':
@@ -526,6 +543,8 @@ class Operator(Node):
             elif status==5:
                 text += (' (CANCELED); localization pause; waypoints retained'
                          if self.route_pause_reason == 'localization' else ' (CANCELED); route cancelled')
+                if self.route_pause_reason == 'localization':
+                    text += '; '+self.localization_pause_detail
             if current and status==4 and not self.waypoints:
                 self.route_started = False
                 text += '; all queued waypoints completed'

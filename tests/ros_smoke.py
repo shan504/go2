@@ -60,6 +60,7 @@ class Sensors(Node):
         self.packet_point_limit = None
         self.sampling = np.random.default_rng(71)
         self.truth, self.odom = np.eye(4),np.eye(4)
+        self.odom_enabled = self.cloud_enabled = True
         self.stop = threading.Event()
         self.emitter = threading.Thread(target=self.emit,daemon=True)
 
@@ -70,13 +71,15 @@ class Sensors(Node):
             q,t = quaternion_from_matrix(self.odom),self.odom[:3,3]
             tf.transform.translation.x,tf.transform.translation.y,tf.transform.translation.z = map(float,t)
             tf.transform.rotation.x,tf.transform.rotation.y,tf.transform.rotation.z,tf.transform.rotation.w = map(float,q)
-            self.tf.sendTransform(tf)
+            if self.odom_enabled:
+                self.tf.sendTransform(tf)
             time.sleep(0.03)
             points = transform_points(self.points,np.linalg.inv(self.truth))
             if self.packet_point_limit is not None and len(points)>self.packet_point_limit:
                 points = points[self.sampling.choice(len(points),self.packet_point_limit,replace=False)]
-            self.pub.publish(point_cloud2.create_cloud_xyz32(
-                Header(stamp=header.stamp,frame_id='base_link'),points.astype(np.float32).tolist()))
+            if self.cloud_enabled:
+                self.pub.publish(point_cloud2.create_cloud_xyz32(
+                    Header(stamp=header.stamp,frame_id='base_link'),points.astype(np.float32).tolist()))
             self.stop.wait(self.packet_wait)
 
     def correction_matches(self,expected):

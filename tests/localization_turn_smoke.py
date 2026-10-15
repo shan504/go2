@@ -98,14 +98,14 @@ def check(directory, base, widened):
         wait_for(lambda: mapper.seeded and sensors.valid is True, seconds=30)
         mapper.registration_timer.cancel()
         assert mapper.p['max_rotation'] == 0.35 and mapper.p['max_translation'] == 0.6
-        assert mapper.p['localization_min_fitness'] == 0.30 and mapper.p['localization_max_rmse'] == 0.15
-        assert mapper.p['stationary_translation_limit'] == 0.25
-        assert mapper.p['stationary_rotation_limit_degrees'] == 8.0
+        assert mapper.p['localization_min_fitness'] == 0.20 and mapper.p['localization_max_rmse'] == 0.20
+        assert mapper.p['stationary_translation_limit'] == 0.35
+        assert mapper.p['stationary_rotation_limit_degrees'] == 12.0
         assert mapper.p['validity_timeout'] == 1.0 and mapper.p['correction_alpha'] == 0.25
         if widened:
-            assert mapper.p['localization_correspondence'] == 0.50
-            assert mapper.p['localization_max_translation'] == 0.80
-            assert mapper.p['localization_max_rotation_degrees'] == 35.0
+            assert mapper.p['localization_correspondence'] == 0.70
+            assert mapper.p['localization_max_translation'] == 1.0
+            assert mapper.p['localization_max_rotation_degrees'] == 45.0
         beginning = len(valid_events)
         previous = change(base @ yaw(30.0), yaw(6.0))
         if not widened:
@@ -135,7 +135,7 @@ def check(directory, base, widened):
         body = transform_matrix(sensors.buffer.lookup_transform('map', 'base_link', Time()).transform)
         np.testing.assert_allclose(body, base @ yaw(180.0), atol=0.025)
         native = yaw(156.0)
-        for contradiction in (base @ yaw(190.0), base @ yaw(180.0, (0.28, 0.0, 0.0))):
+        for contradiction in (base @ yaw(195.0), base @ yaw(180.0, (0.40, 0.0, 0.0))):
             reference = change(contradiction, native)
             assert mapper.last_accepted is None, 'Wider moving bounds admitted a contradictory stationary pose'
             assert 'Rejected GICP correction jump while odometry stationary' in mapper.last_failure, mapper.last_failure
@@ -151,7 +151,7 @@ def check(directory, base, widened):
             next_match()
             assert mapper.last_accepted is not None, mapper.last_failure
             wait_for(lambda: sensors.valid is True)
-        print(f'PASS {directory.name}: stationary10deg/28cm contradictions still invalidate; accepted reference and recovery preserved', flush=True)
+        print(f'PASS {directory.name}: stationary15deg/40cm contradictions still invalidate; accepted reference and recovery preserved', flush=True)
     finally:
         sensors.stop.set()
         sensors.emitter.join(timeout=3)
@@ -180,7 +180,7 @@ def main():
                 check(directory, base, widened=False)
             check(directory, base, widened=True)
             assert (directory / 'map.pcd').read_bytes() == original
-        print('PASS scoped global turn bounds: raw/aligned maps; unchanged mapping, quality, freshness and stationary limits', flush=True)
+        print('PASS global turn bounds: raw/aligned maps; mapping unchanged, bounded localization innovations and recovery', flush=True)
 
 
 if __name__ == '__main__':

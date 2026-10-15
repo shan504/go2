@@ -13,6 +13,12 @@ go2_gicp:
     submap_radius: 25.0
     registration_period: 0.5
     validity_timeout: 1.0
+    # Bounded dead reckoning from the last accepted scan. Never renewed by
+    # bad/empty scans; require cloud <=1s and real odometry <=0.3s throughout.
+    localization_hold_timeout: 3.0
+    localization_hold_distance: 1.0
+    localization_hold_rotation_degrees: 60.0
+    localization_odom_timeout: 0.3
     correspondence_distance: 0.7
     min_fitness: 0.55
     max_rmse: 0.20
@@ -21,15 +27,15 @@ go2_gicp:
     # Match accumulated patrol scans with fewer registration points. Retain
     # the complete saved map and real odometry; mapping quality is unchanged.
     localization_voxel_size: 0.10
-    localization_correspondence: 0.50
+    localization_correspondence: 0.70
     # Bound scan-to-odometry residuals during patrol turns separately from
     # mapping. Actual cumulative turning still comes from timestamped odom.
-    localization_max_translation: 0.80
-    localization_max_rotation_degrees: 35.0
-    localization_min_fitness: 0.30
-    localization_max_rmse: 0.15
+    localization_max_translation: 1.0
+    localization_max_rotation_degrees: 45.0
+    localization_min_fitness: 0.20
+    localization_max_rmse: 0.20
     correction_alpha: 0.25
     # Patrol localization tolerates measured scan variation. Mapping
     # keeps its separate 5cm / 2deg jump check; source freshness is still 1s.
-    stationary_translation_limit: 0.25
-    stationary_rotation_limit_degrees: 8.0
+    stationary_translation_limit: 0.35
+    stationary_rotation_limit_degrees: 12.0

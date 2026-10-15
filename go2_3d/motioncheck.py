@@ -59,6 +59,8 @@ class MotionCheck(Node):
             'progress_checker.movement_time_allowance'],
         'go2_edu_dds_bridge': ['enable_control', 'allow_motion', 'max_linear_speed', 'max_yaw_speed'],
         'go2_gicp': ['scan_window', 'registration_period', 'validity_timeout',
+            'localization_hold_timeout', 'localization_hold_distance',
+            'localization_hold_rotation_degrees', 'localization_odom_timeout',
             'voxel_size', 'localization_voxel_size', 'localization_correspondence',
             'localization_max_translation', 'localization_max_rotation_degrees',
             'localization_min_fitness', 'localization_max_rmse',
@@ -98,6 +100,8 @@ class MotionCheck(Node):
         # silently miss the reason immediately preceding a localization pause.
         self.create_subscription(String, '/localization/status',
                                  status_callback('/localization/status'), qos_profile_sensor_data)
+        self.create_subscription(String, '/localization/state',
+                                 status_callback('/localization/state'), qos_profile_sensor_data)
         self.create_subscription(Bool, '/localization/valid',
                                  lambda msg: self.status(msg, '/localization/valid'), qos_profile_sensor_data)
         self.create_subscription(Odometry, '/odom', self.odom, qos_profile_sensor_data)
@@ -226,6 +230,8 @@ class MotionCheck(Node):
         key = value
         if topic == '/localization/status':
             key = self.localization_status_key(value)
+        elif topic == '/localization/state':
+            key = value.split(';', 1)[0]
         if topic not in self.status_keys or key != self.status_keys[topic]:
             self.status_keys[topic] = key
             self.status_events.append((now-self.started, topic, value))

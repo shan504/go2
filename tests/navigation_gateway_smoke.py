@@ -36,6 +36,7 @@ class TestEndpoints(Node):
         super().__init__('go2_edu_dds_bridge')
         self.declare_parameter('enable_control',False)
         self.valid = False
+        self.publish_valid = True
         self.tf_enabled = True
         self.goals, self.cancels = 0,0
         self.last_goal = None
@@ -69,7 +70,7 @@ class TestEndpoints(Node):
             grid.data = [0]*2500
             self.grids[topic] = (publisher,grid)
             self.grid_enabled[topic] = True
-        self.create_timer(0.05,lambda: self.pub.publish(Bool(data=self.valid)))
+        self.create_timer(0.05,lambda: self.pub.publish(Bool(data=self.valid)) if self.publish_valid else None)
         self.create_timer(0.05,self.sensors)
         if start_action:
             self.start_action()

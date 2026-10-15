@@ -20,6 +20,8 @@ class LocalizedBridge(Go2EduBridge):
     def __init__(self):
         self.localization_valid = False
         self.localization_received = None
+        self.localization_state = 'state not received'
+        self.localization_state_received = None
         self.motion_allowed = False
         self.move_requests = self.nonzero_move_requests = self.stop_requests = 0
         self.last_move = None
@@ -40,6 +42,7 @@ class LocalizedBridge(Go2EduBridge):
         self.declare_parameter('allow_motion',False,ParameterDescriptor(read_only=True))
         self.motion_allowed = self.get_parameter('allow_motion').value
         self.create_subscription(Bool, '/localization/valid', self.on_validity, 1)
+        self.create_subscription(String, '/localization/state', self.on_localization_state, 1)
         self.create_subscription(Response, '/api/sport/response', self.on_response, qos_profile_sensor_data)
         retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -50,6 +53,9 @@ class LocalizedBridge(Go2EduBridge):
     def on_validity(self, message):
         self.localization_valid = message.data
         self.localization_received = time.monotonic()
+
+    def on_localization_state(self, message):
+        self.localization_state, self.localization_state_received = message.data, time.monotonic()
 
     def motion_inputs_fresh(self, now):
         return (self.motion_allowed and self.localization_valid and
@@ -125,8 +131,10 @@ class LocalizedBridge(Go2EduBridge):
             reason = 'navigation motion not allowed'
         elif not self.gate.enabled:
             reason = 'motion disabled'
-        elif not self.localization_valid or not 0 <= localization_age < 0.5:
-            reason = 'localization invalid or stale'
+        elif not 0 <= localization_age < 0.5:
+            reason = 'localization_heartbeat_timeout'
+        elif not self.localization_valid:
+            reason = 'localization_reported_invalid'
         elif not (0 <= odom_age < 1.0 and 0 <= cloud_age < 1.0):
             reason = 'odometry or cloud stale'
         elif self.gate.command is None or not 0 <= command_age <= self.gate.timeout:
@@ -142,6 +150,8 @@ class LocalizedBridge(Go2EduBridge):
                 f'cloud_age={cloud_age:.2f}s cmd_age={command_age:.2f}s cmd={command}; '
                 f'Move_requests={self.move_requests} nonzero_Move_requests={self.nonzero_move_requests} '
                 f'Stop_requests={self.stop_requests}')
+        text += (f'; latest_state_age={age(self.localization_state_received):.2f}s '
+                 f'latest_mapper_{self.localization_state}')
         text += (f'; cmd_received={self.cmd_received} cmd_nonzero={self.cmd_nonzero} '
                  f'cmd_gate_accepted={self.cmd_gate_accepted} cmd_dropped={self.cmd_dropped}')
         if self.last_raw_cmd is not None:

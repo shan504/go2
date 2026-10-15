@@ -24,6 +24,7 @@ class SimulatedRobot(Node):
     def __init__(self):
         super().__init__('simulated_sport_endpoints')
         self.valid = self.cloud_enabled = True
+        self.publish_valid = True
         self.command = Twist()
         self.command.linear.x = 0.08
         self.requests = []
@@ -50,7 +51,8 @@ class SimulatedRobot(Node):
             cloud = PointCloud2()
             cloud.header.frame_id,cloud.header.stamp = 'base_link',stamp
             self.cloud.publish(cloud)
-        self.localization.publish(Bool(data=self.valid))
+        if self.publish_valid:
+            self.localization.publish(Bool(data=self.valid))
         if self.command is not None:
             self.velocity.publish(self.command)
 
@@ -142,7 +144,7 @@ try:
     assert bridge.move_requests==count,'Invalid localization kept sending Move'
     assert bridge.cmd_received>received and bridge.cmd_dropped['localization_invalid_or_stale']>dropped
     assert bridge.cmd_gate_accepted==accepted,'Invalid localization accepted commands into gate'
-    wait_for(lambda: 'gate=localization invalid or stale' in robot.status)
+    wait_for(lambda: 'gate=localization_reported_invalid' in robot.status)
     robot.valid,robot.command = True,None
     spin(0.6)
     assert bridge.move_requests==count,'Localization recovery replayed an old command'
@@ -165,6 +167,21 @@ try:
     assert bridge.cloud_received is not None
     robot.cloud_enabled = True
     wait_for(lambda: bridge.move_requests>count)
+    # Fresh sensors and a last True flag do not replace a live heartbeat.
+    robot.publish_valid = False
+    stops = bridge.stop_requests
+    wait_for(lambda: bridge.stop_requests > stops)
+    count = bridge.move_requests
+    wait_for(lambda: 'gate=localization_heartbeat_timeout' in robot.status)
+    spin(0.2)
+    assert bridge.move_requests == count
+    robot.command = None
+    robot.publish_valid = True
+    spin(0.6)
+    assert bridge.move_requests == count, 'Heartbeat recovery replayed an old command'
+    robot.command = Twist()
+    robot.command.linear.x = 0.08
+    wait_for(lambda: bridge.move_requests > count)
     dropped = bridge.cmd_dropped['nonfinite']
     robot.command.linear.x = float('nan')
     stops = bridge.stop_requests

@@ -27,6 +27,7 @@ from ground import estimate_ground,body_seed_position
 from denoise import clean_directory
 from navigation_grid import build_bundle
 from map_start import start_pose_from_metadata
+from localization_hold import OdometryBudget
 
 INITIAL_POSE_WAIT_SECONDS = 10.0
 
@@ -59,10 +60,12 @@ class Mapper(Node):
                         registration_period=0.5, validity_timeout=1.0,
                         correspondence_distance=0.7, min_fitness=0.55, max_rmse=0.20,
                         max_translation=0.6, max_rotation=0.35,
-                        localization_voxel_size=0.10, localization_correspondence=0.50,
-                        localization_max_translation=0.80, localization_max_rotation_degrees=35.0,
-                        localization_min_fitness=0.30, localization_max_rmse=0.15,
-                        stationary_translation_limit=0.25, stationary_rotation_limit_degrees=8.0,
+                        localization_voxel_size=0.10, localization_correspondence=0.70,
+                        localization_max_translation=1.0, localization_max_rotation_degrees=45.0,
+                        localization_min_fitness=0.20, localization_max_rmse=0.20,
+                        stationary_translation_limit=0.35, stationary_rotation_limit_degrees=12.0,
+                        localization_hold_timeout=3.0, localization_hold_distance=1.0,
+                        localization_hold_rotation_degrees=60.0, localization_odom_timeout=0.3,
                         correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
                         initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
         for name, value in defaults.items():
@@ -74,7 +77,9 @@ class Mapper(Node):
             raise ValueError('mode must be mapping or localization')
         for name in ('stationary_translation_limit', 'stationary_rotation_limit_degrees',
                      'localization_correspondence', 'localization_max_translation',
-                     'localization_max_rotation_degrees'):
+                     'localization_max_rotation_degrees', 'validity_timeout',
+                     'localization_hold_timeout', 'localization_hold_distance',
+                     'localization_hold_rotation_degrees', 'localization_odom_timeout'):
             if not np.isfinite(self.p[name]) or self.p[name] <= 0:
                 raise ValueError(f'{name} must be finite and positive')
         map_name(self.p['map_name'])
@@ -95,6 +100,10 @@ class Mapper(Node):
         self.last_accepted = None
         self.accepted_odom = None
         self.accepted_match_correction = None
+        self.odom_budget = OdometryBudget()
+        self.localization_state = ''
+        self.localization_detail = ''
+        self.hold_exhausted = ''
         self.last_tf_stamp = None
         self.initial_hint_used = False
         self.pending_initial_pose = None
@@ -131,6 +140,7 @@ class Mapper(Node):
         self.registered_pub = self.create_publisher(PointCloud2, '/registered_cloud', qos_profile_sensor_data)
         self.valid_pub = self.create_publisher(Bool, '/localization/valid', 1)
         self.status_pub = self.create_publisher(String, '/localization/status', 1)
+        self.state_pub = self.create_publisher(String, '/localization/state', 1)
         self.create_subscription(PointCloud2, '/point_cloud2', self.receive_cloud, qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.initial_pose, 1)
         self.create_service(Trigger, '/save_3d_map', self.save_map)
@@ -265,6 +275,8 @@ class Mapper(Node):
             self.last_accepted = None
             self.accepted_odom = None
             self.accepted_match_correction = None
+            self.odom_budget.reset(None, None)
+            self.hold_exhausted = ''
             self.processed_stamp = None
             self.last_failure = ''
             self.generation += 1
@@ -330,13 +342,16 @@ class Mapper(Node):
                     # Align scan packets using their own timestamped odometry.
                     # This is not per-return IMU deskew within a scan packet.
                     frames.append(transform_points(xyz,inverse_odom@frame_odom))
-                    frame_sources.append((frame_received,previous.header.stamp))
+                    frame_sources.append((frame_received,previous.header.stamp,frame_odom))
             if not frames:
                 raise ScanMatchUnavailable('Too few finite/range-filtered cloud points')
             # Empty current packets cannot refresh an estimate made solely
             # from older window geometry. Keep the newest CONTRIBUTING
             # scan's original receipt/stamp as the freshness source.
-            source_received,source_stamp = max(frame_sources,key=lambda item:item[0])
+            source_received,source_stamp,source_odom = max(frame_sources,key=lambda item:item[0])
+            if (self.p['mode'] == 'localization' and self.last_accepted is not None and
+                    source_received <= self.last_accepted):
+                raise ScanMatchUnavailable('No new contributing scan; previous geometry cannot renew acceptance')
             input_points = filter_points(np.vstack(frames))
             source = cloud(input_points, self.p['voxel_size'])
             registration_count = len(source.points)
@@ -416,8 +431,9 @@ class Mapper(Node):
                     raise ScanMatchUnavailable('Stationary mapping anchor overlap/residual rejected')
                 fitness, rmse = held.fitness, held.inlier_rmse
             age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
-            if time.monotonic()-source_received > self.p['validity_timeout'] or age > self.p['validity_timeout']:
-                raise ValueError('Registration result too old; reduce cloud/submap size or processing load')
+            if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
+                    not -0.1 <= age <= self.p['validity_timeout']):
+                raise ScanMatchUnavailable('Registration result too old; reduce cloud/submap size or processing load')
             with self.lock:
                 if generation != self.generation:
                     return
@@ -453,6 +469,11 @@ class Mapper(Node):
                 self.last_failure = ''
                 self.accepted_odom = odom_base.copy()
                 self.accepted_match_correction = new_correction.copy()
+                # Empty latest packets can shift the window reference, but
+                # cannot move the hold's time OR motion anchor forward.
+                self.odom_budget.reset(source_odom, Time.from_msg(source_stamp).nanoseconds)
+                self.odom_budget.observe(odom_base, Time.from_msg(message.header.stamp).nanoseconds)
+                self.hold_exhausted = ''
                 header = Header(stamp=message.header.stamp,frame_id='map')
                 self.registered_pub.publish(xyz_message(header,new))
             self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}; mapping_anchor={"held" if hold_mapping_anchor else "updated" if self.p["mode"] == "mapping" else "n/a"}; processing_time={time.monotonic()-started:.3f}s source_age={time.monotonic()-source_received:.3f}s; {self.cloud_diagnostics()}'))
@@ -463,43 +484,77 @@ class Mapper(Node):
                 # A single poor scan does not destroy a still-fresh accepted
                 # estimate. Keep its original receipt deadline and unchanged
                 # correction/reference; do not claim this scan was accepted.
-                holding = (self.p['mode'] == 'localization' and
-                           isinstance(error, ScanMatchUnavailable) and
-                           self.last_accepted is not None and
-                           0 <= time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
-                if not holding:
+                recoverable = self.p['mode'] == 'localization' and isinstance(error, ScanMatchUnavailable)
+                if not recoverable:
                     self.last_accepted = None
                 self.last_failure = str(error)
+                _, state, _ = self.localization_readiness()
             self.get_logger().warning(str(error), throttle_duration_sec=2.0)
-            state = 'holding previous match until its original deadline' if holding else 'no fresh accepted match'
-            self.status_pub.publish(String(data=f'{error}; {state}; {self.cloud_diagnostics()}'))
+            self.status_pub.publish(String(data=f'{error}; state={state}; {self.cloud_diagnostics()}'))
+
+    def localization_readiness(self):
+        """Shared validity/TF gate. Caller holds lock; use only real odom stamps."""
+        if not self.seeded or self.last_accepted is None:
+            hint = ('initial-pose hint queued; waiting for fresh cloud/odometry'
+                    if self.pending_initial_pose is not None else
+                    'waiting for initial pose' if not self.initialized else 'waiting for accepted GICP')
+            return False, 'registration_invalid', hint+'; last_match_failure='+self.last_failure
+        now = time.monotonic()
+        accepted_age = now-self.last_accepted
+        detail = (f'accepted_age={accepted_age:.2f}s travel={self.odom_budget.distance:.3f}m'
+                  f' turn={np.degrees(self.odom_budget.angle):.1f}deg'
+                  f'; last_match_failure={self.last_failure or "none"}')
+        if not 0 <= accepted_age <= self.p['localization_hold_timeout']:
+            return False, 'registration_timeout', detail
+        if self.hold_exhausted:
+            return False, self.hold_exhausted, detail
+        if self.latest is None or not 0 <= now-self.latest[2] <= self.p['validity_timeout']:
+            receipt_age = now-self.latest[2] if self.latest is not None else float('inf')
+            return False, 'cloud_timeout', detail+f' cloud_receipt_age={receipt_age:.2f}s'
+        cloud_age = (self.get_clock().now()-Time.from_msg(self.latest[0].header.stamp)).nanoseconds/1e9
+        if not -0.1 <= cloud_age <= self.p['validity_timeout']:
+            return False, 'cloud_timestamp_stale', detail+f' cloud_age={cloud_age:.2f}s'
+        try:
+            odom = self.buffer.lookup_transform('odom', 'base_link', Time())
+            stamp = Time.from_msg(odom.header.stamp)
+            age = (self.get_clock().now()-stamp).nanoseconds/1e9
+            if not -0.1 <= age <= self.p['localization_odom_timeout']:
+                return False, 'odometry_timeout', detail+f' odom_age={age:.2f}s'
+            matrix = transform_matrix(odom.transform)
+        except (TransformException, ValueError) as error:
+            return False, 'odometry_unavailable', detail+f' {error}'
+        if not self.odom_budget.observe(matrix, stamp.nanoseconds):
+            return False, 'odometry_clock_regressed', detail
+        self.hold_exhausted = self.odom_budget.exceeded(
+            self.p['localization_hold_distance'], np.deg2rad(self.p['localization_hold_rotation_degrees']))
+        detail = (f'accepted_age={accepted_age:.2f}s odom_age={age:.2f}s travel={self.odom_budget.distance:.3f}m'
+                  f' turn={np.degrees(self.odom_budget.angle):.1f}deg; last_match_failure={self.last_failure or "none"}')
+        if self.hold_exhausted:
+            return False, self.hold_exhausted, detail
+        state = 'odometry_hold' if self.last_failure or accepted_age > self.p['validity_timeout'] else 'tracking'
+        return True, state, detail
 
     def health(self):
         with self.lock:
-            valid = (self.p['mode'] == 'localization' and self.last_accepted is not None and
-                     time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
-            if self.p['mode']=='localization' and not self.initialized and time.monotonic()-self.waiting_status_time>2:
-                if self.pending_initial_pose is not None:
-                    text = 'Initial-pose hint queued; waiting for fresh cloud and timestamped odometry'
-                elif self.last_failure:
-                    text = self.last_failure
-                else:
-                    text = ('Waiting for fresh cloud and timestamped odometry' if self.latest is None else
-                            'Waiting for actual /initialpose in map; publish robot position and heading; Nav2 startup deferred')
-                text += f'; {self.cloud_status}; {self.cloud_diagnostics()}'
-                self.status_pub.publish(String(data=text))
-                self.waiting_status_time = time.monotonic()
-            elif self.p['mode']=='localization' and not valid and time.monotonic()-self.waiting_status_time>2:
-                cloud_age = time.monotonic()-self.latest[2] if self.latest else float('inf')
-                accepted_age = time.monotonic()-self.last_accepted if self.last_accepted else float('inf')
-                self.status_pub.publish(String(data=f'Localization invalid: {self.last_failure or "waiting for a fresh accepted GICP match"}; cloud_age={cloud_age:.2f}s accepted_age={accepted_age:.2f}s; {self.cloud_status}; {self.cloud_diagnostics()}'))
-                self.waiting_status_time = time.monotonic()
+            valid = False
+            if self.p['mode'] == 'localization':
+                valid, state, detail = self.localization_readiness()
+                if state != self.localization_state or time.monotonic()-self.waiting_status_time > 2:
+                    self.report(f'Localization state={state} valid={valid}; {detail}; '
+                                f'{self.cloud_status}; {self.cloud_diagnostics()}')
+                    self.waiting_status_time = time.monotonic()
+                self.localization_state, self.localization_detail = state, detail
+                self.state_pub.publish(String(data=f'state={state} valid={valid}; {detail}'))
         self.valid_pub.publish(Bool(data=valid))
 
     def publish_correction(self):
         with self.lock:
-            if (not self.seeded or self.last_accepted is None or
-                    time.monotonic()-self.last_accepted > self.p['validity_timeout']):
+            if self.p['mode'] == 'localization':
+                valid, _, _ = self.localization_readiness()
+            else:
+                valid = (self.seeded and self.last_accepted is not None and
+                         0 <= time.monotonic()-self.last_accepted <= self.p['validity_timeout'])
+            if not valid:
                 return
             try:
                 odom = self.buffer.lookup_transform('odom','base_link',Time())

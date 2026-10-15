@@ -58,14 +58,14 @@ def main():
         try:
             wait_for(lambda: mapper.seeded and sensors.valid is True)
             mapper.registration_timer.cancel()
-            assert mapper.p['stationary_translation_limit'] == 0.25
-            assert mapper.p['stationary_rotation_limit_degrees'] == 8.0
+            assert mapper.p['stationary_translation_limit'] == 0.35
+            assert mapper.p['stationary_rotation_limit_degrees'] == 12.0
             assert mapper.p['scan_window'] == 0.5 and mapper.p['localization_voxel_size'] == 0.10
-            wait_for(lambda: 'scan_frames=8 ' in sensors.localization_status or
-                            'scan_frames=9 ' in sensors.localization_status)
+            wait_for(lambda: len(mapper.history) >= 9)
+            next_match()
             beginning = len(valid_events)
-            for displacement in (0.076,0.,0.091,0.,0.101,0.):
-                angle = np.deg2rad(1.89 if displacement else 0.)
+            for displacement in (0.076,0.,0.091,0.,0.101,0.,0.28,0.):
+                angle = np.deg2rad(10.0 if displacement == 0.28 else 1.89 if displacement else 0.)
                 pose = pose_matrix([displacement,0.,0.],
                                    [0.,0.,np.sin(angle/2),np.cos(angle/2)])
                 change_pose(pose)
@@ -73,7 +73,7 @@ def main():
                 np.testing.assert_allclose(mapper.accepted_match_correction,pose,atol=0.035)
             wait_for(lambda: len(valid_events)>beginning)
             assert all(valid_events[beginning:]), 'Small patrol corrections interrupted live localization'
-            print('PASS accumulated patrol GICP: 0.5s/~8 sampled packets, 10cm registration voxel, 7.6/9.1/10.1cm and 1.89deg corrections keep localization continuously valid',flush=True)
+            print('PASS accumulated patrol GICP: 0.5s/~8 sampled packets, 10cm registration voxel; corrections through 28cm/10deg keep localization continuously valid',flush=True)
 
             # One missing scan holds ONLY the original accepted estimate, with
             # no correction change and no refresh of its receipt/deadline.
@@ -106,14 +106,14 @@ def main():
             next_match()
             wait_for(lambda: sensors.valid is True)
             assert mapper.last_accepted>accepted
-            print('PASS one missing scan: unchanged prior/reference and original 1s deadline; a genuine fresh match recovers',flush=True)
+            print('PASS one missing scan: unchanged prior/reference and original 3s deadline; a genuine fresh match recovers',flush=True)
 
             # Even with fresh DDS clouds and odometry, repeated bad scans must
             # expire the old acceptance. They cannot perpetually renew it.
             accepted = mapper.last_accepted
             sensors.points = np.zeros((3,3))
             wait_for(lambda: mapper.latest[0].width == 3)
-            while time.monotonic()-accepted <= mapper.p['validity_timeout']+0.25:
+            while time.monotonic()-accepted <= mapper.p['localization_hold_timeout']+0.25:
                 next_match()
             wait_for(lambda: sensors.valid is False)
             stopped_stamp = sensors.correction_stamp()
@@ -124,10 +124,10 @@ def main():
             next_match()
             next_match()
             wait_for(lambda: sensors.valid is True)
-            print('PASS persistent missing scans: old 1s deadline expires, localization invalid and map TF stops despite fresh DDS input',flush=True)
+            print('PASS persistent missing scans: old 3s deadline expires, localization invalid and map TF stops despite fresh DDS input',flush=True)
 
-            for pose in (pose_matrix([0.28,0.,0.],[0.,0.,0.,1.]),
-                         pose_matrix([0.,0.,0.],[0.,0.,np.sin(np.deg2rad(10.)/2),np.cos(np.deg2rad(10.)/2)])):
+            for pose in (pose_matrix([0.40,0.,0.],[0.,0.,0.,1.]),
+                         pose_matrix([0.,0.,0.],[0.,0.,np.sin(np.deg2rad(15.)/2),np.cos(np.deg2rad(15.)/2)])):
                 reference = mapper.accepted_match_correction.copy()
                 # Let a full fresh window carry the new pose before its first
                 # match, so this checks one over-limit correction directly.
@@ -144,7 +144,7 @@ def main():
                 next_match()
                 wait_for(lambda: sensors.valid is True)
             assert (directory/'map.pcd').read_bytes() == original_map
-            print('PASS over-limit 28cm/10deg corrections invalidate immediately; rejected results do not poison recovery; saved PCD unchanged',flush=True)
+            print('PASS over-limit 40cm/15deg corrections invalidate immediately; rejected results do not poison recovery; saved PCD unchanged',flush=True)
         finally:
             sensors.stop.set()
             sensors.emitter.join(timeout=3)
