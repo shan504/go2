@@ -87,15 +87,6 @@ class GeometryTests(unittest.TestCase):
 
 
 class GICPTests(unittest.TestCase):
-    def test_cloud_accepts_immutable_map_snapshot_without_mutating_it(self):
-        points = room()
-        original = points.copy()
-        points.setflags(write=False)
-        result = cloud(points, None)
-        np.testing.assert_array_equal(np.asarray(result.points), original)
-        self.assertFalse(points.flags.writeable)
-        np.testing.assert_array_equal(points, original)
-
     def test_fine_gicp_with_changing_low_height_scans(self):
         points = room()
         points = points[points[:,2] < 0.5]

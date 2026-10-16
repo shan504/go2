@@ -28,7 +28,6 @@ from denoise import clean_directory
 from navigation_grid import build_bundle
 from map_start import start_pose_from_metadata
 from localization_hold import OdometryBudget
-from mapping_store import MappingStore
 
 INITIAL_POSE_WAIT_SECONDS = 10.0
 
@@ -113,11 +112,8 @@ class Mapper(Node):
         self.last_keyframe = None
         self.last_keyframe_time = None
         self.mapping_start_pose = None
-        self.mapping_store = (MappingStore(self.p['map_voxel_size'], self.p['voxel_size'])
-                              if self.p['mode'] == 'mapping' else None)
-        self.capacity_warned = False
-        self._points = np.empty((0,3))
-        self._registration_points = np.empty((0,3))
+        self.points = np.empty((0,3))
+        self.registration_points = np.empty((0,3))
         self.localization_points = np.empty((0,3))
         self.grid = ObservedGrid(self.p['grid_resolution'])
         self.map_metadata = {}
@@ -127,10 +123,10 @@ class Mapper(Node):
             self.map_metadata = yaml.safe_load((directory/'metadata.yaml').read_text())
             if self.p['auto_initialize'] and self.p['initial_from_map_start']:
                 self.saved_start_pose = start_pose_from_metadata(self.map_metadata)
-            self._points = np.asarray(o3d.io.read_point_cloud(str(directory/'map.pcd')).points).copy()
+            self.points = np.asarray(o3d.io.read_point_cloud(str(directory/'map.pcd')).points).copy()
             if len(self.points) < 100:
                 raise ValueError('Missing/empty 3D map.pcd; localization cannot start')
-            self._registration_points = np.asarray(cloud(self.points,self.p['voxel_size']).points).copy()
+            self.registration_points = np.asarray(cloud(self.points,self.p['voxel_size']).points).copy()
             self.localization_points = np.asarray(cloud(self.points,self.p['localization_voxel_size']).points).copy()
             self.get_logger().info('Loaded 3D map; automatic initialization from saved mapping start'
                                    if self.p['auto_initialize'] and self.p['initial_from_map_start'] else
@@ -163,20 +159,6 @@ class Mapper(Node):
     def report(self, text):
         self.status_pub.publish(String(data=text))
         self.get_logger().info(text)
-
-    @property
-    def points(self):
-        """Complete immutable snapshot for publishing/saving, never a live crop."""
-        return self.mapping_store.snapshot() if self.mapping_store is not None else self._points
-
-    @property
-    def registration_points(self):
-        return (self.mapping_store.registration_snapshot() if self.mapping_store is not None
-                else self._registration_points)
-
-    @property
-    def map_point_count(self):
-        return self.mapping_store.count if self.mapping_store is not None else len(self._points)
 
     def cloud_diagnostics(self):
         with self.lock:
@@ -331,7 +313,7 @@ class Mapper(Node):
             if self.latest is None or not self.initialized or time.monotonic()-self.latest[2] > 1.0:
                 return
             message, odom_base, received = self.latest
-            if not self.map_point_count and time.monotonic()-self.first_received < self.p['scan_window']:
+            if not len(self.points) and time.monotonic()-self.first_received < self.p['scan_window']:
                 return
             stamp = (message.header.stamp.sec, message.header.stamp.nanosec)
             if stamp == self.processed_stamp:
@@ -340,8 +322,7 @@ class Mapper(Node):
             generation, correction, seeded = self.generation, self.correction.copy(), self.seeded
             # Arrays are replaced, never edited in place; snapshot references
             # stay valid while callbacks replace the current map.
-            points = self._registration_points
-            map_count = self.map_point_count
+            points = self.registration_points
             localization_points = self.localization_points
             history = list(self.history)
             previous_odom = self.accepted_odom
@@ -383,18 +364,13 @@ class Mapper(Node):
             # Mapping predicts from its established coordinate anchor.
             prediction = previous_match if self.p['mode'] == 'localization' and seeded else correction
             guess = prediction @ odom_base
-            if not map_count and self.p['mode'] == 'mapping':
+            if not len(points) and self.p['mode'] == 'mapping':
                 # Zero first position/heading, but preserve the odometry Z
                 # direction. Identity here had baked initial body roll/pitch
                 # into the entire map and its ground/costmap projection.
                 matched, fitness, rmse = first_map_pose(odom_base), 1.0, 0.0
             elif self.p['mode'] == 'mapping' or not seeded:
-                if self.mapping_store is not None:
-                    # Only nearby coarse blocks participate in registration;
-                    # all fine blocks remain in the complete saved map.
-                    nearby = self.mapping_store.nearby(guess[:3,3], self.p['submap_radius'])
-                else:
-                    nearby = points[np.linalg.norm(points-guess[:3,3],axis=1) < self.p['submap_radius']]
+                nearby = points[np.linalg.norm(points-guess[:3,3],axis=1) < self.p['submap_radius']]
                 target = cloud(nearby, None)
                 result = align(source, target, guess,
                                correspondence=self.p['correspondence_distance'],
@@ -458,43 +434,37 @@ class Mapper(Node):
             if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
                     not -0.1 <= age <= self.p['validity_timeout']):
                 raise ScanMatchUnavailable('Registration result too old; reduce cloud/submap size or processing load')
-            # Prepare every fallible map/grid/payload calculation before
-            # committing pose or acceptance. A failed keyframe cannot move
-            # the map frame while its geometry remains at the old pose.
-            output_correction = (correction if hold_mapping_anchor else
-                                 blend_correction(correction,new_correction,self.p['correction_alpha'],odom_base)
-                                 if self.p['mode'] == 'localization' and seeded else new_correction)
-            matched = output_correction@odom_base
-            mapped_points = transform_points(input_points,matched)
-            registered = cloud(mapped_points,self.p['map_voxel_size'])
-            new = np.asarray(registered.points)
-            header = Header(stamp=message.header.stamp,frame_id='map')
-            registered_message = xyz_message(header,new)
-            now = time.monotonic()
-            update, free_additions = None, None
-            if self.mapping_store is not None:
-                delta = np.eye(4) if self.last_keyframe is None else np.linalg.inv(self.last_keyframe)@matched
-                elapsed = self.last_keyframe_time is None or now-self.last_keyframe_time >= self.p['keyframe_max_interval']
-                if self.last_keyframe is None or elapsed or np.linalg.norm(delta[:3,3]) > 0.25 or rotation_angle(delta) > 0.17:
-                    update = self.mapping_store.prepare(mapped_points)
-                    free_additions = self.grid.prepare_observation(new,matched[:3,3])
-            age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
-            if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
-                    not -0.1 <= age <= self.p['validity_timeout']):
-                raise ScanMatchUnavailable('Registration result too old after map update preparation; '
-                                           'no pose or map changes committed')
             with self.lock:
                 if generation != self.generation:
                     return
-                if update is not None:
-                    self.mapping_store.commit(update)
-                    self.grid.free.update(free_additions)
-                    self.last_keyframe = matched.copy()
-                    self.last_keyframe_time = now
-                    if self.mapping_start_pose is None:
-                        self.mapping_start_pose = matched.copy()
-                self.correction = output_correction
+                # Never filter a rejected match. Bootstrap/reseed snaps only
+                # after GICP acceptance; later correction noise is damped while
+                # odom->base_link retains the full measured robot motion.
+                if hold_mapping_anchor:
+                    self.correction = correction
+                else:
+                    self.correction = (blend_correction(correction,new_correction,self.p['correction_alpha'],odom_base)
+                                       if self.p['mode'] == 'localization' and seeded else new_correction)
+                matched = self.correction@odom_base
                 self.seeded = True
+                # Registration stays coarse for ARM CPU cost. Retain original
+                # XYZ at a finer resolution for the 3D map and visual scan.
+                registered = cloud(transform_points(input_points,matched),self.p['map_voxel_size'])
+                new = np.asarray(registered.points)
+                now = time.monotonic()
+                if self.p['mode'] == 'mapping':
+                    delta = np.eye(4) if self.last_keyframe is None else np.linalg.inv(self.last_keyframe)@matched
+                    elapsed = self.last_keyframe_time is None or now-self.last_keyframe_time >= self.p['keyframe_max_interval']
+                    if self.last_keyframe is None or elapsed or np.linalg.norm(delta[:3,3]) > 0.25 or rotation_angle(delta) > 0.17:
+                        combined = np.asarray(cloud(np.vstack((self.points,new)),self.p['map_voxel_size']).points).copy()
+                        if len(combined) > self.p['max_map_points']:
+                            raise ValueError('Map point budget reached; save map and begin localization')
+                        self.grid.observe(new,matched[:3,3])
+                        self.points, self.last_keyframe = combined, matched.copy()
+                        if self.mapping_start_pose is None:
+                            self.mapping_start_pose = matched.copy()
+                        self.registration_points = np.asarray(cloud(combined,self.p['voxel_size']).points).copy()
+                        self.last_keyframe_time = now
                 self.last_accepted = source_received
                 self.last_failure = ''
                 self.accepted_odom = odom_base.copy()
@@ -504,18 +474,9 @@ class Mapper(Node):
                 self.odom_budget.reset(source_odom, Time.from_msg(source_stamp).nanoseconds)
                 self.odom_budget.observe(odom_base, Time.from_msg(message.header.stamp).nanoseconds)
                 self.hold_exhausted = ''
-                self.registered_pub.publish(registered_message)
-                count = self.map_point_count
-                threshold = self.p['max_map_points']
-                warn_capacity = (self.mapping_store is not None and not self.capacity_warned and
-                                 threshold > 0 and count > threshold)
-                if warn_capacity:
-                    self.capacity_warned = True
-            if warn_capacity:
-                self.get_logger().warning(f'Map size advisory crossed: {count} points > {threshold}; '
-                    'mapping continues at unchanged resolution; all historical blocks retained. '
-                    'Save a checkpoint when convenient; monitor available memory and storage.')
-            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={count} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}; mapping_anchor={"held" if hold_mapping_anchor else "updated" if self.p["mode"] == "mapping" else "n/a"}; processing_time={time.monotonic()-started:.3f}s source_age={time.monotonic()-source_received:.3f}s; {self.cloud_diagnostics()}'))
+                header = Header(stamp=message.header.stamp,frame_id='map')
+                self.registered_pub.publish(xyz_message(header,new))
+            self.status_pub.publish(String(data=f'GICP fitness={fitness:.3f} rmse={rmse:.3f} map_points={len(self.points)} scan_frames={len(frames)} scan_points={len(input_points)} registration_points={registration_count} fine={self.p["mode"] == "localization"}; mapping_anchor={"held" if hold_mapping_anchor else "updated" if self.p["mode"] == "mapping" else "n/a"}; processing_time={time.monotonic()-started:.3f}s source_age={time.monotonic()-source_received:.3f}s; {self.cloud_diagnostics()}'))
         except Exception as error:
             with self.lock:
                 if generation != self.generation:
@@ -645,9 +606,7 @@ class Mapper(Node):
         directory = new_directory(root,map_name(self.p['map_name']))
         try:
             directory.mkdir(parents=True,exist_ok=False)
-            # MappingStore already retained every voxel at the configured
-            # resolution. Export its exact full snapshot without re-thinning.
-            if not o3d.io.write_point_cloud(str(directory/'map.pcd'),cloud(points,None),compressed=True):
+            if not o3d.io.write_point_cloud(str(directory/'map.pcd'),cloud(points,self.p['map_voxel_size']),compressed=True):
                 raise RuntimeError('PCD write failed')
             grid = ObservedGrid(self.p['grid_resolution'])
             grid.free = free
