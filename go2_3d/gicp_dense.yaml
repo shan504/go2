@@ -3,6 +3,7 @@ go2_gicp:
     # Retention resolution, not a claim of 2 cm positioning accuracy.
     map_voxel_size: 0.02
     max_map_points: 1000000
+    # Size advisory only: continue at 2cm beyond this count; retain all blocks.
     keyframe_max_interval: 0.5
     # Timestamp-aligned scan packets fill the LiDAR's nonrepeating pattern.
     scan_window: 0.5

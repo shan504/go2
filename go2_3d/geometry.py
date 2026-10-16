@@ -116,7 +116,14 @@ class ObservedGrid:
         self.max_cells = max_cells
         self.free = set()
 
-    def observe(self, points, origin):
+    def prepare_observation(self, points, origin):
+        """Return new free cells after validating the observation's budget.
+
+        Preparation never changes the live grid. Callers can finish other
+        fallible frame calculations before committing these cells with
+        ``free.update``. Only previously unseen cells are retained, so this
+        does not copy the entire accumulated map on each observation.
+        """
         start = tuple(np.floor(np.asarray(origin)[:2]/self.resolution).astype(int))
         delta = points[:, :2] - np.asarray(origin)[:2]
         distances = np.linalg.norm(delta, axis=1)
@@ -128,12 +135,19 @@ class ObservedGrid:
             if distances[index] < 0.2 or distances[index] > 20:
                 continue
             selected.setdefault(int(bins[index]), int(index))
+        additions = set()
         for index in selected.values():
             end = tuple(np.floor(points[index,:2]/self.resolution).astype(int))
             cells = list(line_cells(start, end))
-            self.free.update(cells[:-1])
-        if len(self.free) > self.max_cells:
+            additions.update(cell for cell in cells[:-1] if cell not in self.free)
+            if len(self.free) + len(additions) > self.max_cells:
+                raise RuntimeError("Observed-space limit exceeded; save a smaller map")
+        if len(self.free) + len(additions) > self.max_cells:
             raise RuntimeError("Observed-space limit exceeded; save a smaller map")
+        return additions
+
+    def observe(self, points, origin):
+        self.free.update(self.prepare_observation(points, origin))
 
     def export(self, points, directory, floor_z=-0.30, min_height=0.10, max_height=1.5,
                ground_model=None):
