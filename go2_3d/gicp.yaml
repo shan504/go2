@@ -9,6 +9,7 @@ go2_gicp:
     floor_z: -0.30
     obstacle_min_height: 0.10
     obstacle_max_height: 1.5
+    # Compatibility name: advisory only, never reject a keyframe or crop history.
     max_map_points: 200000
     submap_radius: 25.0
     registration_period: 0.5

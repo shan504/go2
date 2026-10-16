@@ -7,7 +7,12 @@ from geometry import rotation_angle, quaternion_from_matrix, pose_matrix
 
 def cloud(points, voxel=0.15):
     result = o3d.geometry.PointCloud()
-    result.points = o3d.utility.Vector3dVector(np.asarray(points, dtype=float))
+    coordinates = np.asarray(points, dtype=float)
+    # Ubuntu Humble's Open3D 0.14 requires writable input even though it
+    # copies the data. Preserve immutable map snapshots instead of unlocking.
+    if not coordinates.flags.writeable:
+        coordinates = coordinates.copy()
+    result.points = o3d.utility.Vector3dVector(coordinates)
     return result if voxel is None else result.voxel_down_sample(voxel)
 
 
