@@ -2,6 +2,8 @@
 """Odometry-seeded 3D scan-to-map GICP and saved-map localization (ROS2 Humble)."""
 import threading
 import time
+import json
+from dataclasses import fields
 from collections import deque
 from pathlib import Path
 from map_library import map_name, new_directory, publish
@@ -29,6 +31,9 @@ from navigation_grid import build_bundle
 from map_start import start_pose_from_metadata
 from localization_hold import OdometryBudget
 from mapping_store import MappingStore
+from loop_closure import LoopConfig
+from mapping_loop import MappingLoopWorker
+from mapping_rebuild import MappingObservation
 
 INITIAL_POSE_WAIT_SECONDS = 10.0
 
@@ -69,9 +74,15 @@ class Mapper(Node):
                         localization_hold_rotation_degrees=60.0, localization_odom_timeout=0.3,
                         correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
                         initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
+        defaults['loop_closure_enabled'] = True
+        loop_defaults = LoopConfig()
+        defaults.update({'loop_'+field.name: getattr(loop_defaults, field.name)
+                         for field in fields(loop_defaults)})
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self.p = {k: self.get_parameter(k).value for k in defaults}
+        loop_config = LoopConfig(**{field.name: self.p['loop_'+field.name]
+                                    for field in fields(loop_defaults)})
         if not 0 < self.p['correction_alpha'] <= 1:
             raise ValueError('correction_alpha must be greater than 0 and at most 1')
         if self.p['mode'] not in ('mapping','localization'):
@@ -145,6 +156,13 @@ class Mapper(Node):
         self.valid_pub = self.create_publisher(Bool, '/localization/valid', 1)
         self.status_pub = self.create_publisher(String, '/localization/status', 1)
         self.state_pub = self.create_publisher(String, '/localization/state', 1)
+        self.loop_pub = self.create_publisher(String, '/mapping/loop_closure', retained)
+        self.loop_worker = (MappingLoopWorker(
+            self.lock, loop_config, self.p['map_voxel_size'], self.p['voxel_size'],
+            self.p['grid_resolution'], self.prepare_loop_correction)
+            if self.p['mode'] == 'mapping' and self.p['loop_closure_enabled'] else None)
+        self.last_loop_report = None
+        self.loop_applied_reported = 0
         self.create_subscription(PointCloud2, '/point_cloud2', self.receive_cloud, qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.initial_pose, 1)
         self.create_service(Trigger, '/save_3d_map', self.save_map)
@@ -472,12 +490,15 @@ class Mapper(Node):
             registered_message = xyz_message(header,new)
             now = time.monotonic()
             update, free_additions = None, None
+            observation = None
             if self.mapping_store is not None:
                 delta = np.eye(4) if self.last_keyframe is None else np.linalg.inv(self.last_keyframe)@matched
                 elapsed = self.last_keyframe_time is None or now-self.last_keyframe_time >= self.p['keyframe_max_interval']
                 if self.last_keyframe is None or elapsed or np.linalg.norm(delta[:3,3]) > 0.25 or rotation_angle(delta) > 0.17:
                     update = self.mapping_store.prepare(mapped_points)
                     free_additions = self.grid.prepare_observation(new,matched[:3,3])
+                    if self.loop_worker is not None:
+                        observation = MappingObservation(input_points, matched)
             age = (self.get_clock().now()-Time.from_msg(source_stamp)).nanoseconds/1e9
             if (not 0 <= time.monotonic()-source_received <= self.p['validity_timeout'] or
                     not -0.1 <= age <= self.p['validity_timeout']):
@@ -493,6 +514,8 @@ class Mapper(Node):
                     self.last_keyframe_time = now
                     if self.mapping_start_pose is None:
                         self.mapping_start_pose = matched.copy()
+                    if observation is not None:
+                        self.loop_worker.append(observation)
                 self.correction = output_correction
                 self.seeded = True
                 self.last_accepted = source_received
@@ -584,7 +607,36 @@ class Mapper(Node):
                     self.waiting_status_time = time.monotonic()
                 self.localization_state, self.localization_detail = state, detail
                 self.state_pub.publish(String(data=f'state={state} valid={valid}; {detail}'))
+            elif self.loop_worker is not None:
+                report = self.loop_worker.report()
+                self.loop_pub.publish(String(data=json.dumps(report, sort_keys=True)))
+                summary = (report['state'], report['applied_loops'], report['error'])
+                if ((summary != self.last_loop_report and report['state'] in ('applied', 'error', 'rebuilding')) or
+                        report['applied_loops'] > self.loop_applied_reported):
+                    self.get_logger().info('Mapping loop closure: '+json.dumps(report, sort_keys=True))
+                self.loop_applied_reported = report['applied_loops']
+                self.last_loop_report = summary
         self.valid_pub.publish(Bool(data=valid))
+
+    def prepare_loop_correction(self, store, grid, poses, delta):
+        """Prepare allocations before backend commit; return a ref-only swap."""
+        correction = delta @ self.correction
+        accepted = (delta @ self.accepted_match_correction
+                    if self.accepted_match_correction is not None else None)
+        last, start, generation = poses[-1], poses[0], self.generation+1
+        def publish():
+            self.mapping_store, self.grid = store, grid
+            self.correction, self.accepted_match_correction = correction, accepted
+            self.last_keyframe, self.mapping_start_pose = last, start
+            # Reject registration prepared against the previous map revision.
+            # Raw odometry, timestamps and freshness budgets stay intact.
+            self.generation = generation
+        return publish
+
+    def destroy_node(self):
+        if getattr(self, 'loop_worker', None) is not None:
+            self.loop_worker.close()
+        return super().destroy_node()
 
     def publish_correction(self):
         with self.lock:
@@ -627,17 +679,29 @@ class Mapper(Node):
     def publish_map(self):
         with self.lock:
             points = self.points
+            generation = self.generation
         if len(points):
             header = Header(stamp=self.get_clock().now().to_msg(),frame_id='map')
-            self.map_pub.publish(xyz_message(header,points))
+            message = xyz_message(header,points)
+            with self.lock:
+                if generation == self.generation:
+                    self.map_pub.publish(message)
 
     def save_map(self, request, response):
         if self.p['mode'] != 'mapping':
             response.success, response.message = False, 'Save is available only in mapping mode'
             return response
         with self.lock:
+            if self.loop_worker is not None and not self.loop_worker.ready_for_save():
+                response.success, response.message = False, (
+                    'Loop closure check/rebuild pending or failed; stop at the revisited area, '
+                    'wait for /mapping/loop_closure checked_observations=observations and '
+                    'state=idle/applied, then save again. '+json.dumps(self.loop_worker.report()))
+                return response
             points, free = self.points.copy(), self.grid.free.copy()
             start_pose = self.mapping_start_pose.copy() if self.mapping_start_pose is not None else np.eye(4)
+            loop_report = (dict(enabled=True, **self.loop_worker.report()) if self.loop_worker is not None
+                           else dict(enabled=False, applied_loops=0))
         if len(points) < 100:
             response.success, response.message = False, 'No usable 3D map yet'
             return response
@@ -657,7 +721,10 @@ class Mapper(Node):
             (directory/'metadata.yaml').write_text(yaml.safe_dump(dict(frame_id='map',parameters=self.p,
                 map_start_pose=start_pose.tolist(),
                 ground_model=ground,navigation_denoise=denoise_report,
-                map_type='incremental GICP scan-to-map; no loop closure',point_count=len(points))))
+                loop_closure=loop_report,
+                map_type='GICP scan-to-map with SE3 pose-graph loop closure enabled'
+                    if self.loop_worker is not None else 'incremental GICP scan-to-map; loop closure disabled',
+                point_count=len(points))))
             # Raw observations remain as a retained version. Publish only
             # the complete shared-coordinate bundle used by every map load.
             aligned = new_directory(root,map_name(self.p['map_name']),'leveled-')

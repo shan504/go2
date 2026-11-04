@@ -73,7 +73,12 @@ bash go2_3d/run.sh navigation dense
 地图由三维扫描与连续里程计的预测姿态配准后累积，首帧机身位置、朝向是 `map` 原点。
 新建图保留里程计 Z 轴方向，不再把首帧机身的 roll/pitch 当成地图轴方向。
 只加入通过重叠率、残差及位姿修正阈值检查的关键帧；保存二进制 PCD。
-这是增量三维 scan-to-map 建图，**没有闭环优化**，较大场地可能累积漂移。
+新建图在增量三维 scan-to-map 的基础上增加回环检测与位姿图优化：重新经过历史区域时，
+先验证点云是否确实来自同一地点，再将累计误差分配到整段关键帧轨迹，重建完整三维地图和自由空间证据。
+该流程对所有地图名及 standard/dense 建图共同生效，不按某张农场地图设置特殊坐标。
+保存与后续定位/导航继续使用公共地面对齐链路。回环状态、现场步骤和验证范围见
+[回环建图与农场验证](docs/LOOP_CLOSURE_VALIDATION.md)。
+仅有融合 PCD 的旧地图缺少逐帧观测与轨迹，不能通过重新加载自动消除过去的累计漂移；原图和历史版本保留。
 原生点云的运动畸变补偿、里程计质量仍取决于机器狗输出。
 
 定位加载三维 PCD，默认以所选地图保存的建图起点自动初始化，再做GICP精配准。
@@ -93,6 +98,7 @@ bash go2_3d/run.sh navigation dense
 - 起点自动初始化后点选 `/goal_pose` 收集航点，启用确认后转换成 Nav2 `NavigateToPose` action；其他位置可用 `/initialpose` 重定位。
 - 发布 `/control/enable` 启用或停止运动；`/navigation/cancel` 取消导航。
 - 查看 `/localization/status`、`/localization/valid`、`/operator/status`、`/control/status`。
+- 建图时查看 `/mapping/loop_closure`，以回环已提交的状态确认整图修正完成；仅看到两段点云靠近还不能证明闭环成功。
 
 可导入 [预设 Foxglove 导航布局](docs/foxglove_go2_navigation.json)，左 3D 面板用于初始位姿，
 右 3D 面板用于目标点。场景右侧尺子下方的发布工具需要先启用，再依次**单击位置、单击朝向**；
