@@ -37,8 +37,10 @@ class Operator(Node):
                 not math.isfinite(self.auto_resume_timeout) or self.auto_resume_timeout <= 0):
             raise ValueError('automatic resume needs stable_seconds >= 1 and a positive timeout')
         self.auto_resume = None
+        self.last_auto_resume_revocation = ''
         self.recovery_epoch = -1
         self.recovery_state = 'idle'
+        self.recovery_detail = ''
         self.pause_disable_confirmed = False
         self.costmap_clear = {}
         self.valid = False
@@ -115,6 +117,8 @@ class Operator(Node):
             current = self.inflight_waypoint[0] if self.inflight_waypoint else '-'
             text += f'; route current={current} queued={len(self.waypoints)} completed={self.completed_waypoints} paused={self.route_paused}'
             text += f' started={self.route_started}'
+            if self.route_paused and self.auto_resume is None and self.last_auto_resume_revocation:
+                text += f'; auto_resume_revoked={self.last_auto_resume_revocation}'
             self.publish_waypoints()
         self.status.publish(String(data=text))
         self.get_logger().info(text)
@@ -161,6 +165,8 @@ class Operator(Node):
         """Manual/new route intent supersedes the previous recovery authority."""
         previous = self.auto_resume
         self.auto_resume = None
+        if previous is not None:
+            self.last_auto_resume_revocation = reason or 'automatic recovery authorization cleared'
         if (previous is not None and previous['stage'] == 'enabling' and
                 self.parameters.service_is_ready()):
             request = SetParameters.Request()
@@ -169,6 +175,53 @@ class Operator(Node):
                 self.parameters.call_async(request)
             except Exception as error:
                 self.get_logger().error(f'Automatic enable revoked; bridge disable request failed: {error}')
+        if previous is not None and reason:
+            self.report('Automatic resume authorization revoked: '+reason)
+
+    def report_auto_wait(self, reason, detail=''):
+        """Expose the actual gate without flooding status at watchdog rate."""
+        intent = self.auto_resume
+        if intent is None:
+            return
+        now = time.monotonic()
+        key = (reason, intent['stage'])
+        if intent.get('wait_report_key') == key and now-intent.get('wait_report_time', 0.) < 5.:
+            return
+        intent['wait_report_key'], intent['wait_report_time'] = key, now
+        remaining = max(0., self.auto_resume_timeout-(now-intent['started']))
+        self.report(f'Automatic resume waiting: reason={reason} stage={intent["stage"]} '
+            f'baseline_epoch={intent["baseline_epoch"]} proof_epoch={intent["proof_epoch"]} '
+            f'recovery_epoch={self.recovery_epoch} recovery_state={self.recovery_state} '
+            f'remaining={remaining:.1f}s; {detail}')
+
+    def request_queued_revalidation(self, intent):
+        """Coalesce stale proof retries; repeated DDS samples send no flood."""
+        epoch = intent.get('pending_revalidation_epoch')
+        now = time.monotonic()
+        if (self.auto_resume is not intent or epoch is None or
+                now-intent.get('last_revalidation_at', float('-inf')) < 2.):
+            return
+        self.recover_localization.publish(Empty())
+        intent['last_revalidation_at'] = now
+        intent['last_stale_request_epoch'] = epoch
+        intent['pending_revalidation_epoch'] = None
+
+    def reject_stale_recovery(self, intent, epoch, age):
+        # A recovered event ends the mapper's episode. Merely ignoring its
+        # old scan timestamp would leave tracking=True with no future proof.
+        # Keep the age gate and ask for NEW scans, within the original window.
+        if intent['stage'] == 'enabling':
+            # Invalidate the old parameter callback by identity before its
+            # response can dispatch an action, and confirm a new disable.
+            intent = dict(intent)
+            self.auto_resume = intent
+            self.disable_paused_bridge()
+        intent.update(proof_epoch=None, stable_since=None, stage='waiting',
+                      clears={}, cleared_at=None, baseline_epoch=epoch,
+                      proof_rejection=f'recovered epoch={epoch} source_age={age:.3f}s rejected as stale')
+        if epoch > intent.get('last_stale_request_epoch', -1):
+            intent['pending_revalidation_epoch'] = epoch
+        self.report_auto_wait('stale_recovery_proof', intent['proof_rejection']+'; requesting fresh mapper proof')
 
     def on_recovery(self, message):
         try:
@@ -182,6 +235,7 @@ class Operator(Node):
             return
         previous_epoch, previous_state = self.recovery_epoch, self.recovery_state
         self.recovery_epoch, self.recovery_state = epoch, state
+        self.recovery_detail = str(event.get('reason', ''))
         if state == 'manual_initialization':
             # Pose and validity use independent DDS topics. Revoke authority
             # even if this event precedes Bool(false) and no pause intent yet
@@ -201,6 +255,9 @@ class Operator(Node):
                 self.clear_auto_resume(state)
                 return
             intent.update(proof_epoch=None, stable_since=None, stage='waiting', clears={}, cleared_at=None)
+            pending = intent.get('pending_revalidation_epoch')
+            if pending is not None and epoch > pending:
+                intent['pending_revalidation_epoch'] = None
         elif (state == 'recovered' and epoch > intent['baseline_epoch'] and
               isinstance(event.get('confirmations'), int) and event['confirmations'] >= 3 and
               event.get('source_stamp') is not None and epoch != intent['proof_epoch']):
@@ -208,11 +265,15 @@ class Operator(Node):
                 stamp = float(event['source_stamp'])
                 age = self.get_clock().now().nanoseconds/1e9-stamp
                 if not math.isfinite(stamp) or not -.1 <= age <= 1.0:
+                    if math.isfinite(stamp) and age > 1.0:
+                        self.reject_stale_recovery(intent, epoch, age)
                     return
             except (ValueError, TypeError):
                 return
             intent['proof_epoch'] = epoch
             intent['stable_since'] = None
+            intent['pending_revalidation_epoch'] = None
+            intent['proof_rejection'] = ''
 
     def on_initial_pose(self, message):
         if self.mode != 'navigation':
@@ -262,8 +323,12 @@ class Operator(Node):
         self.pause_disable_confirmed = False
         self.auto_resume = (dict(generation=self.goal_generation, motion_generation=self.motion_generation,
             started=time.monotonic(), baseline_epoch=self.recovery_epoch, proof_epoch=None,
-            stable_since=None, stage='waiting', clears={}, cleared_at=None)
+            stable_since=None, stage='waiting', clears={}, cleared_at=None,
+            pending_revalidation_epoch=None, last_stale_request_epoch=-1,
+            last_revalidation_at=float('-inf'), proof_rejection='')
             if recover_running else None)
+        if self.auto_resume is not None:
+            self.last_auto_resume_revocation = ''
         self.localization_pause_detail = self.localization_loss_detail()
         if self.inflight_waypoint is not None:
             self.waypoints.appendleft(self.inflight_waypoint)
@@ -274,8 +339,20 @@ class Operator(Node):
             self.motion_state.remove_pending_request(future)
         if self.goal_pending:
             self.cancel_requested = True
-        # Canceling an action is asynchronous. Disable the real bridge too,
-        # so newly arriving controller commands cannot move it on recovery.
+        self.disable_paused_bridge()
+        self.cancel_active_goal()
+        if self.auto_resume is not None:
+            self.recover_localization.publish(Empty())
+            self.auto_resume['last_revalidation_at'] = time.monotonic()
+        self.report('Route paused: live localization lost; '+self.localization_pause_detail+
+                    ('; waypoints retained; automatic resume awaits verified recovery, stable TF and cleared costmaps'
+                     if self.auto_resume is not None else
+                     '; waypoints retained; enable motion after localization recovers'))
+
+    def disable_paused_bridge(self):
+        # Canceling an action is asynchronous. Confirm that the real bridge
+        # is disabled as well before any later recovery can authorize motion.
+        self.pause_disable_confirmed = False
         if self.parameters.service_is_ready() and self.pause_disable_future is None:
             request = SetParameters.Request()
             request.parameters = [Parameter('enable_control',value=False).to_parameter_msg()]
@@ -296,13 +373,6 @@ class Operator(Node):
                 except Exception as error:
                     self.report(f'Route paused; motion bridge disable failed: {error}; action cancellation requested')
             future.add_done_callback(disabled)
-        self.cancel_active_goal()
-        if self.auto_resume is not None:
-            self.recover_localization.publish(Empty())
-        self.report('Route paused: live localization lost; '+self.localization_pause_detail+
-                    ('; waypoints retained; automatic resume awaits verified recovery, stable TF and cleared costmaps'
-                     if self.auto_resume is not None else
-                     '; waypoints retained; enable motion after localization recovers'))
 
     def validate_recovered_route(self, require_costmaps=True):
         """Require both the retained target and the recovered body to be free."""
@@ -316,14 +386,15 @@ class Operator(Node):
             transform = self.buffer.lookup_transform(grid.header.frame_id,'base_footprint',Time())
             age = (self.get_clock().now()-Time.from_msg(transform.header.stamp)).nanoseconds/1e9
             if not -0.1 <= age <= .5:
-                raise ValueError('recovered robot TF is stale')
+                raise ValueError(f'{topic}: recovered robot TF stale age={age:.3f}s')
             xy = [transform.transform.translation.x, transform.transform.translation.y]
             cell = grid_cell(grid, xy)
             if cell is None:
-                raise ValueError(f'{topic}: recovered robot is outside grid')
+                raise ValueError(f'{topic}: recovered robot XY=({xy[0]:.3f},{xy[1]:.3f}) outside grid')
             value = grid.data[cell[1]*grid.info.width+cell[0]]
             if value < 0 or value >= 99:
-                raise ValueError(f'{topic}: recovered robot cell is not free')
+                raise ValueError(f'{topic}: recovered robot XY=({xy[0]:.3f},{xy[1]:.3f}) '
+                                 f'cell={cell} value={value} is not free')
 
     def try_automatic_resume(self):
         intent = self.auto_resume
@@ -335,9 +406,10 @@ class Operator(Node):
             return
         now = time.monotonic()
         if now-intent['started'] > self.auto_resume_timeout:
-            self.clear_auto_resume()
+            self.clear_auto_resume('recovery timeout')
             self.report('Automatic recovery wait expired; route retained; explicit enable required')
             return
+        self.request_queued_revalidation(intent)
         if not self.localized():
             intent['stable_since'] = None
             if intent['stage'] == 'enabling':
@@ -350,30 +422,51 @@ class Operator(Node):
                 intent.update(proof_epoch=None, baseline_epoch=self.recovery_epoch,
                               stage='waiting', clears={}, cleared_at=None)
                 self.recover_localization.publish(Empty())
+                intent['last_revalidation_at'] = now
+            self.report_auto_wait('localization_unavailable', self.localization_loss_detail())
             return
-        if (intent['proof_epoch'] is None or not self.pause_disable_confirmed or
-                self.pause_disable_future is not None or self.goal_handle is not None or
-                self.goal_pending or self.cancelling or not self.action.server_is_ready()):
+        if intent['proof_epoch'] is None:
+            self.report_auto_wait('recovery_proof',
+                f'{intent.get("proof_rejection") or self.recovery_detail}; '
+                f'queued_revalidation_epoch={intent.get("pending_revalidation_epoch")}')
+            return
+        if not self.pause_disable_confirmed or self.pause_disable_future is not None:
+            self.report_auto_wait('bridge_disable', f'confirmed={self.pause_disable_confirmed} '
+                f'pending={self.pause_disable_future is not None}')
+            return
+        if self.goal_handle is not None or self.goal_pending or self.cancelling:
+            self.report_auto_wait('action_cancel', f'handle={self.goal_handle is not None} '
+                f'goal_pending={self.goal_pending} cancelling={self.cancelling}')
+            return
+        if not self.action.server_is_ready():
+            self.report_auto_wait('nav2_action_unavailable', self.startup_status)
             return
         try:
             # Old rolling grids can contain ghosts at the previous pose.
             # Clear them after the static map/TF gate, then validate all NEW
             # costmaps before restoring any movement authority.
             self.validate_recovered_route(require_costmaps=intent['stage'] in ('refreshing', 'enabling'))
-        except (ValueError, TransformException, KeyError):
+        except (ValueError, TransformException, KeyError) as error:
             intent['stable_since'] = None
+            text = str(error)
+            topic = next((topic for topic in ('/global_costmap/costmap', '/local_costmap/costmap', '/map')
+                          if topic in text), '')
+            category = ('tf' if isinstance(error, TransformException) or 'TF' in text else
+                        'body' if 'recovered robot' in text else 'goal_or_grid')
+            self.report_auto_wait(f'validation:{category}:{topic}', text)
             return
         if intent['stable_since'] is None:
             intent['stable_since'] = now
+            self.report_auto_wait('stabilizing', f'required={self.auto_resume_stable:.1f}s')
             return
         if now-intent['stable_since'] < self.auto_resume_stable:
+            self.report_auto_wait('stabilizing', f'stable_age={now-intent["stable_since"]:.2f}s '
+                                  f'required={self.auto_resume_stable:.1f}s')
             return
         if intent['stage'] == 'waiting':
             if not all(client.service_is_ready() for client in self.costmap_clear.values()):
-                if not intent.get('missing_clear_reported'):
-                    intent['missing_clear_reported'] = True
-                    self.report('Automatic resume waiting: Nav2 clear-costmap services unavailable; '
-                                'route retained; explicit enable remains available after localization recovers')
+                missing = [name for name,client in self.costmap_clear.items() if not client.service_is_ready()]
+                self.report_auto_wait('clear_services', f'unavailable={missing}; explicit enable remains available')
                 return
             intent['stage'] = 'clearing'
             try:
@@ -388,6 +481,8 @@ class Operator(Node):
             return
         if intent['stage'] == 'clearing':
             if not all(future.done() for future in intent['clears'].values()):
+                self.report_auto_wait('costmap_clear',
+                    f'completed={[(name,future.done()) for name,future in intent["clears"].items()]}')
                 return
             try:
                 for future in intent['clears'].values():
@@ -406,9 +501,15 @@ class Operator(Node):
                 grid, received = self.grids[topic]
                 if (received <= intent['cleared_at'] or
                         Time.from_msg(grid.header.stamp).nanoseconds < intent['cleared_stamp']):
+                    grid_age = (self.get_clock().now()-Time.from_msg(grid.header.stamp)).nanoseconds/1e9
+                    self.report_auto_wait('costmap_refresh:'+topic,
+                        f'{topic} receipt_age={now-received:.3f}s header_age={grid_age:.3f}s; '
+                        'waiting for a grid produced after both clear responses')
                     return
             intent['stage'] = 'enabling'
             self.on_enable(Bool(data=True), automatic=True)
+        elif intent['stage'] == 'enabling':
+            self.report_auto_wait('bridge_enable', 'waiting for parameter acknowledgment; route remains paused')
 
     def on_save(self,message):
         if self.mode != 'mapping':
@@ -431,7 +532,9 @@ class Operator(Node):
         if automatic and intent is None:
             return
         if not automatic:
-            self.clear_auto_resume('manual enable/disable')
+            self.clear_auto_resume('manual enable' if message.data else 'manual disable')
+            if message.data:
+                self.last_auto_resume_revocation = ''
             self.motion_generation += 1
         generation = self.motion_generation
         route_generation = self.goal_generation

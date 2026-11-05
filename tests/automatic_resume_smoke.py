@@ -7,11 +7,13 @@ import copy
 import json
 import threading
 import time
+from unittest.mock import patch
 
 import rclpy
 from rclpy.action import CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.task import Future
 from nav2_msgs.srv import ClearEntireCostmap
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from std_msgs.msg import Bool, Empty, String
@@ -27,6 +29,13 @@ class RecoveryEndpoints(QueueEndpoints):
         self.ghost_cells = {}
         self.recover_requests = 0
         self.recovery_event = None
+        self.recovery_epoch = 0
+        self.respond_to_revalidation = False
+        self.pending_revalidation_response = None
+        self.operator_messages = []
+        self.create_subscription(String,'/operator/status',
+            lambda message: self.operator_messages.append((time.monotonic(),message.data)),
+            self.startup.qos_profile)
         self.recovery = self.create_publisher(String,'/localization/recovery',self.startup.qos_profile)
         self.initial = self.create_publisher(PoseWithCovarianceStamped,'/initialpose',1)
         self.create_subscription(Empty,'/localization/recover',self.requested,1)
@@ -41,15 +50,26 @@ class RecoveryEndpoints(QueueEndpoints):
 
     def requested(self,message):
         self.recover_requests += 1
+        if self.respond_to_revalidation and self.valid:
+            self.pending_revalidation_response = dict(started=time.monotonic(),ticks=0)
 
     def publish_recovery(self):
+        pending = self.pending_revalidation_response
+        if pending is not None and self.respond_to_revalidation and self.valid and self.publish_valid:
+            pending['ticks'] += 1
+            if pending['ticks'] >= 3 and time.monotonic()-pending['started'] >= .15:
+                self.pending_revalidation_response = None
+                self.event(self.recovery_epoch+1)
+                return
         if self.recovery_event is not None:
             self.recovery.publish(String(data=json.dumps(self.recovery_event)))
 
     def event(self,epoch,state='recovered',confirmations=3,source_age=0.):
-        self.recovery_event = dict(state=state,epoch=epoch,confirmations=confirmations,
+        self.recovery_epoch = max(epoch,self.recovery_epoch+1)
+        self.recovery_event = dict(state=state,epoch=self.recovery_epoch,confirmations=confirmations,
             source_stamp=self.get_clock().now().nanoseconds/1e9-source_age)
         self.publish_recovery()
+        return self.recovery_epoch
 
     def clear(self,name,response):
         self.clear_calls[name] += 1
@@ -80,6 +100,8 @@ def main():
         endpoints.goal.publish(message)
 
     def reset():
+        endpoints.respond_to_revalidation = False
+        endpoints.pending_revalidation_response = None
         endpoints.cancel.publish(Empty())
         wait_for(lambda: not operator.waypoints and operator.goal_handle is None and not operator.goal_pending)
         endpoints.valid = True
@@ -132,7 +154,11 @@ def main():
         # cannot restart an otherwise user-authorized retained route.
         endpoints.valid = True
         assert_stopped(current)
+        requests = endpoints.recover_requests
+        original_started = operator.auto_resume['started']
         endpoints.event(2,source_age=60.)
+        wait_for(lambda: endpoints.recover_requests==requests+1)
+        assert operator.auto_resume['started']==original_started
         assert_stopped(current)
         endpoints.event(3,confirmations=2)
         assert_stopped(current)
@@ -144,6 +170,9 @@ def main():
         wait_for(lambda: operator.grids['/map'][0].data[index]==100)
         endpoints.event(4)
         assert_stopped(current)
+        assert any('reason=validation:body:/map' in text and 'XY=' in text and
+                   'cell=' in text and 'value=100' in text for _,text in endpoints.operator_messages), \
+            'blocked robot cell was not exposed in recovery waiting status'
         endpoints.valid = False
         wait_for(lambda: operator.auto_resume is not None and operator.auto_resume['proof_epoch'] is None)
         endpoints.valid = True
@@ -170,6 +199,11 @@ def main():
         for topic in ('/global_costmap/costmap','/local_costmap/costmap'):
             endpoints.grid_enabled[topic] = True
         assert_stopped(current)
+        endpoints.respond_to_revalidation = True
+        # The intentionally blocked-grid interval can outlive a test Bool
+        # packet. Supply a NEW mapper proof here and answer any subsequent
+        # real revalidation request while this positive case expects resume.
+        endpoints.event(endpoints.recovery_epoch+1)
         local_grid.data[occupied] = 0
         wait_for(lambda: endpoints.goals==current+1 and operator.goal_handle is not None)
         assert endpoints.positions[-1] == .4
@@ -190,6 +224,8 @@ def main():
         assert 'localization_heartbeat_timeout' in operator.localization_pause_detail
         wait_for(lambda: endpoints.recover_requests > requests)
         endpoints.publish_valid = True
+        wait_for(operator.localized)
+        endpoints.respond_to_revalidation = True
         endpoints.event(6)
         wait_for(lambda: endpoints.goals==current+1 and operator.goal_handle is not None)
         reset()
@@ -201,6 +237,8 @@ def main():
         pause()
         endpoints.freeze_after_clear = True
         endpoints.valid = True
+        wait_for(operator.localized)
+        endpoints.respond_to_revalidation = True
         endpoints.event(7)
         wait_for(lambda: operator.auto_resume is not None and operator.auto_resume['stage']=='refreshing')
         endpoints.enable.publish(Bool(data=False))
@@ -290,14 +328,121 @@ def main():
         reset()
         print('PASS abort during localization cancellation revokes automatic retry',flush=True)
 
+        # A one-shot recovered event can be delayed beyond its scan age gate
+        # even though tracking remains healthy. Request NEW proof rather than
+        # silently waiting until the route authority expires.
+        current = start()
+        requests = endpoints.recover_requests
+        pause()
+        wait_for(lambda: endpoints.recover_requests > requests)
+        requests = endpoints.recover_requests
+        original_started = operator.auto_resume['started']
+        endpoints.valid = True
+        wait_for(operator.localized)
+        endpoints.tf_enabled = False
+        endpoints.respond_to_revalidation = True
+        endpoints.event(30)
+        wait_for(lambda: any('reason=validation:tf:' in text for _,text in endpoints.operator_messages))
+        since = time.monotonic()
+        time.sleep(1.2)
+        # TF age changes at every watchdog tick. A stable category key must
+        # throttle these numeric changes rather than publishing at 10 Hz.
+        assert sum(when >= since and 'reason=validation:tf:' in text
+                   for when,text in endpoints.operator_messages) <= 1
+        endpoints.respond_to_revalidation = False
+        requests = endpoints.recover_requests
+        endpoints.event(31,source_age=60.)
+        wait_for(lambda: endpoints.recover_requests==requests+1)
+        assert operator.auto_resume['proof_epoch'] is None
+        assert operator.auto_resume['started']==original_started
+        assert_stopped(current,2.25)
+        assert endpoints.recover_requests==requests+1, 'duplicate stale events repeatedly requested recovery'
+        endpoints.tf_enabled = True
+        endpoints.respond_to_revalidation = True
+        endpoints.event(32)
+        wait_for(lambda: endpoints.goals==current+1 and operator.goal_handle is not None)
+        assert endpoints.positions[-1]==.4 and endpoints.max_active==1
+        reset()
+        print('PASS stale recovered event requests one fresh proof, preserves deadline and resumes after new proof/clears',flush=True)
+
+        # A stale-proof retry queued behind backoff is still subordinate to
+        # manual stop; neither its timer nor a later fresh proof may rearm it.
+        current = start()
+        requests = endpoints.recover_requests
+        pause()
+        wait_for(lambda: endpoints.recover_requests > requests)
+        requests = endpoints.recover_requests
+        endpoints.valid = True
+        stale_epoch = endpoints.event(33,source_age=60.)
+        wait_for(lambda: operator.auto_resume is not None and
+                 operator.auto_resume['pending_revalidation_epoch']==stale_epoch)
+        endpoints.enable.publish(Bool(data=False))
+        wait_for(lambda: operator.auto_resume is None and not operator.waypoints)
+        assert_stopped(current,2.25)
+        assert endpoints.recover_requests==requests, 'revoked retry still requested mapper revalidation'
+        endpoints.event(34)
+        assert_stopped(current)
+        reset()
+        print('PASS manual stop revokes queued stale-proof request and rejects later recovery authority',flush=True)
+
+        # Delay only the client's acknowledgment of a REAL successful enable.
+        # A newer stale proof must revoke that in-flight callback's token and
+        # confirm a real disable before it can obtain fresh recovery authority.
+        current = start()
+        pause()
+        endpoints.valid = True
+        wait_for(operator.localized)
+        original_call = operator.parameters.call_async
+        held = {'once': False, 'ready': threading.Event()}
+        def delay_first_auto_enable(request):
+            actual = original_call(request)
+            if (not held['once'] and operator.auto_resume is not None and
+                    operator.auto_resume['stage']=='enabling' and
+                    any(parameter.name=='enable_control' and parameter.value.bool_value
+                        for parameter in request.parameters)):
+                held['once'] = True
+                held['proxy'] = Future(executor=executor)
+                def finished(future):
+                    held['response'] = future.result()
+                    held['ready'].set()
+                actual.add_done_callback(finished)
+                return held['proxy']
+            return actual
+        with patch.object(operator.parameters,'call_async',side_effect=delay_first_auto_enable):
+            endpoints.event(50)
+            wait_for(lambda: held['ready'].is_set() and operator.auto_resume is not None and
+                     operator.auto_resume['stage']=='enabling' and
+                     endpoints.get_parameter('enable_control').value)
+            previous = operator.auto_resume
+            original_started = previous['started']
+            requests = endpoints.recover_requests
+            endpoints.event(51,source_age=60.)
+            wait_for(lambda: operator.auto_resume is not None and operator.auto_resume is not previous and
+                     operator.pause_disable_confirmed and not endpoints.get_parameter('enable_control').value)
+            assert operator.auto_resume['started']==original_started
+            wait_for(lambda: endpoints.recover_requests==requests+1)
+            held['proxy'].set_result(held['response'])
+            assert_stopped(current,.3)
+            endpoints.respond_to_revalidation = True
+            endpoints.event(52)
+            wait_for(lambda: endpoints.goals==current+1 and operator.goal_handle is not None)
+            assert endpoints.positions[-1]==.4 and endpoints.max_active==1
+        reset()
+        print('PASS stale proof during real enable revokes old acknowledgment until disable and new recovery proof',flush=True)
+
         # Missing Nav2 clearing capability and recovery timeouts fail closed.
         for service in endpoints.clear_services:
             endpoints.destroy_service(service)
         current = start()
-        operator.auto_resume_timeout = 2.5
+        operator.auto_resume_timeout = 3.5
         pause()
+        missing_clear_started = time.monotonic()
+        endpoints.respond_to_revalidation = True
         endpoints.valid = True
-        endpoints.event(22)
+        wait_for(operator.localized)
+        endpoints.event(40)
+        wait_for(lambda: any(when >= missing_clear_started and 'reason=clear_services' in text
+                            for when,text in endpoints.operator_messages),seconds=4)
         wait_for(lambda: operator.auto_resume is None,seconds=5)
         assert_stopped(current,.2)
         assert operator.route_paused and len(operator.waypoints)==1
