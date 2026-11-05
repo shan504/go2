@@ -27,6 +27,13 @@ go2_gicp:
     localization_hold_distance: 1.0
     localization_hold_rotation_degrees: 60.0
     localization_odom_timeout: 0.3
+    # Independent recovery after previously accepted localization is lost.
+    # Does not weaken normal GICP or extend the dead-reckoning limits above.
+    auto_relocalization: true
+    recovery_period: 1.0
+    recovery_max_translation: 2.0
+    recovery_max_rotation_degrees: 20.0
+    recovery_confirmations: 3
     correspondence_distance: 0.7
     min_fitness: 0.55
     max_rmse: 0.20

@@ -200,12 +200,17 @@ class GicpEndpoints(Node):
                       localization_correspondence=0.30, submap_radius=25.0,
                       localization_max_translation=0.80, localization_max_rotation_degrees=35.0,
                       localization_min_fitness=0.30, localization_max_rmse=0.15,
+                      auto_relocalization=True, recovery_max_translation=2.0,
+                      recovery_max_rotation_degrees=20.0, recovery_confirmations=3, recovery_period=1.0,
                       map_voxel_size=0.02, map_publish_period=3.0,
                       stationary_translation_limit=0.25, stationary_rotation_limit_degrees=8.0)
         for name in MotionCheck.PARAMETERS['go2_gicp']:
             self.declare_parameter(name, values[name])
         self.status = self.create_publisher(String, '/localization/status', 10)
         self.valid = self.create_publisher(Bool, '/localization/valid', 10)
+        self.recovery = self.create_publisher(String, '/localization/recovery',
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
 
 def localization_timeline():
@@ -222,6 +227,12 @@ def localization_timeline():
         assert actual['validity_timeout'] == 1.0 and actual['localization_voxel_size'] == 0.10
         assert actual['stationary_translation_limit'] == 0.25
         assert actual['stationary_rotation_limit_degrees'] == 8.0
+        assert actual['auto_relocalization'] is True and actual['recovery_confirmations'] == 3
+        assert actual['recovery_max_translation'] == 2.0 and actual['recovery_max_rotation_degrees'] == 20.0
+        mapper.recovery.publish(String(data=json.dumps(dict(state='confirming', epoch=2,
+            confirmations=2, reason='fresh geometric checks'))))
+        harness.wait(lambda: '/localization/recovery' in monitor.latest)
+        assert json.loads(monitor.latest['/localization/recovery'][1])['confirmations'] == 2
         assert actual['localization_min_fitness'] == 0.30 and actual['localization_max_rmse'] == 0.15
         assert actual['localization_max_translation'] == 0.80
         assert actual['localization_max_rotation_degrees'] == 35.0

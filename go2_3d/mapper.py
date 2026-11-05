@@ -16,7 +16,7 @@ from rclpy.time import Time
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profile_sensor_data
-from std_msgs.msg import Bool, String, Header
+from std_msgs.msg import Bool, String, Header, Empty
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import PointCloud2
 from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
@@ -34,6 +34,8 @@ from mapping_store import MappingStore
 from loop_closure import LoopConfig
 from mapping_loop import MappingLoopWorker
 from mapping_rebuild import MappingObservation
+from relocalization import Relocalizer, RecoveryConfig
+from localization_recovery import RecoveryWorker, RecoveryJob
 
 INITIAL_POSE_WAIT_SECONDS = 10.0
 
@@ -75,6 +77,10 @@ class Mapper(Node):
                         correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
                         initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
         defaults['loop_closure_enabled'] = True
+        defaults.update(auto_relocalization=True, recovery_period=1.0, recovery_reference_timeout=60.0)
+        recovery_defaults = RecoveryConfig()
+        defaults.update({'recovery_'+field.name: getattr(recovery_defaults, field.name)
+                         for field in fields(recovery_defaults)})
         loop_defaults = LoopConfig()
         defaults.update({'loop_'+field.name: getattr(loop_defaults, field.name)
                          for field in fields(loop_defaults)})
@@ -83,6 +89,12 @@ class Mapper(Node):
         self.p = {k: self.get_parameter(k).value for k in defaults}
         loop_config = LoopConfig(**{field.name: self.p['loop_'+field.name]
                                     for field in fields(loop_defaults)})
+        self.recovery_config = RecoveryConfig(**{field.name: self.p['recovery_'+field.name]
+                                                for field in fields(recovery_defaults)})
+        if (self.recovery_config.confirmations < 3 or
+                not all(np.isfinite(self.p[name]) and self.p[name] > 0
+                        for name in ('recovery_period', 'recovery_reference_timeout'))):
+            raise ValueError('recovery requires at least three scans and a positive search period')
         if not 0 < self.p['correction_alpha'] <= 1:
             raise ValueError('correction_alpha must be greater than 0 and at most 1')
         if self.p['mode'] not in ('mapping','localization'):
@@ -133,6 +145,17 @@ class Mapper(Node):
         self.grid = ObservedGrid(self.p['grid_resolution'])
         self.map_metadata = {}
         self.saved_start_pose = None
+        self.recovery_ever_localized = False
+        self.recovery_trusted_received = None
+        self.recovery_episode = False
+        self.recovery_serial = 0
+        self.recovery_epoch = 0
+        self.recovery_normal_count = 0
+        self.recovery_normal_correction = None
+        self.recovery_normal_stamp = None
+        self.recovery_last_queued = float('-inf')
+        self.recovery_report = dict(state='idle', epoch=0, confirmations=0,
+                                    reason='waiting for initial accepted localization')
         if self.p['mode'] == 'localization':
             directory = Path(self.p['map_directory'])
             self.map_metadata = yaml.safe_load((directory/'metadata.yaml').read_text())
@@ -157,6 +180,10 @@ class Mapper(Node):
         self.status_pub = self.create_publisher(String, '/localization/status', 1)
         self.state_pub = self.create_publisher(String, '/localization/state', 1)
         self.loop_pub = self.create_publisher(String, '/mapping/loop_closure', retained)
+        self.recovery_pub = self.create_publisher(String, '/localization/recovery', retained)
+        self.recovery_worker = (RecoveryWorker(Relocalizer(self.localization_points, self.recovery_config),
+                                               self.recovery_completed)
+                                if self.p['mode'] == 'localization' and self.p['auto_relocalization'] else None)
         self.loop_worker = (MappingLoopWorker(
             self.lock, loop_config, self.p['map_voxel_size'], self.p['voxel_size'],
             self.p['grid_resolution'], self.prepare_loop_correction)
@@ -165,6 +192,7 @@ class Mapper(Node):
         self.loop_applied_reported = 0
         self.create_subscription(PointCloud2, '/point_cloud2', self.receive_cloud, qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.initial_pose, 1)
+        self.create_subscription(Empty, '/localization/recover', self.request_revalidation, 1)
         self.create_service(Trigger, '/save_3d_map', self.save_map)
         self.create_timer(0.1, self.health)
         # Cloud and TF arrive on independent DDS topics. Retry asynchronously
@@ -286,6 +314,154 @@ class Mapper(Node):
     def initial_pose(self, message):
         self.seed_initial_pose(message)
 
+    def recovery_status(self, state, reason, confirmations=0, **details):
+        """Publish proof separately from the Bool heartbeat; caller holds lock."""
+        if state != self.recovery_report['state']:
+            self.recovery_epoch += 1
+        self.recovery_report = dict(state=state, epoch=self.recovery_epoch,
+                                    confirmations=int(confirmations), reason=reason, **details)
+        self.recovery_pub.publish(String(data=json.dumps(self.recovery_report, sort_keys=True)))
+
+    def begin_recovery(self, reason):
+        if (self.recovery_worker is None or not self.recovery_ever_localized or
+                not self.seeded or self.pending_initial_pose is not None):
+            return
+        if not self.recovery_episode:
+            self.recovery_episode = True
+            self.recovery_serial += 1
+            self.recovery_normal_count = 0
+            self.recovery_normal_correction = None
+            self.recovery_normal_stamp = None
+            self.recovery_status('searching', reason)
+
+    def request_revalidation(self, message):
+        # Operator can detect a missed Bool heartbeat even when this mapper's
+        # internal tracking remained valid. Require new scan proof in that case.
+        with self.lock:
+            self.begin_recovery('route paused; validating localization with fresh scans')
+
+    def normal_recovery_confirmation(self, correction, odom, received, stamp_ns, fitness, rmse):
+        # Any normal accepted scan invalidates a concurrently computed search.
+        self.recovery_serial += 1
+        was_localized = self.recovery_ever_localized
+        self.recovery_ever_localized = True
+        self.recovery_trusted_received = received
+        if not self.recovery_episode:
+            if not was_localized:
+                self.recovery_status('idle', 'initial trusted localization established')
+            return
+        if fitness < self.recovery_config.min_overlap or rmse > self.recovery_config.max_rmse:
+            # Normal patrol tracking intentionally accepts lower partial
+            # overlap. It cannot alone authorize an automatic route restart.
+            self.recovery_normal_count = 0
+            self.recovery_normal_correction = None
+            self.recovery_normal_stamp = None
+            self.recovery_status('confirming', 'tracking valid; awaiting stronger geometry for route recovery',
+                                 fitness=float(fitness), rmse=float(rmse))
+            return
+        if self.recovery_normal_stamp is not None and received <= self.recovery_normal_stamp:
+            return
+        if self.recovery_normal_stamp is not None:
+            gap = received-self.recovery_normal_stamp
+            if gap < self.recovery_config.confirmation_interval:
+                return
+            if gap > self.recovery_config.confirmation_timeout:
+                self.recovery_normal_count = 0
+                self.recovery_normal_correction = None
+        consistent = False
+        if self.recovery_normal_correction is not None:
+            delta = np.linalg.inv(self.recovery_normal_correction @ odom) @ (correction @ odom)
+            consistent = (np.linalg.norm(delta[:3,3]) <= self.recovery_config.consistency_translation and
+                          rotation_angle(delta) <= np.deg2rad(self.recovery_config.consistency_rotation_degrees))
+        self.recovery_normal_count = self.recovery_normal_count+1 if consistent else 1
+        self.recovery_normal_correction = correction.copy()
+        self.recovery_normal_stamp = received
+        state = ('recovered' if self.recovery_normal_count >= self.recovery_config.confirmations else 'confirming')
+        self.recovery_status(state, 'normal scan matching revalidated', self.recovery_normal_count,
+                             source_stamp=stamp_ns/1e9, method='tracking')
+        if state == 'recovered':
+            self.recovery_episode = False
+
+    def queue_recovery(self, points, odom, source_odom, received, stamp_ns):
+        """Called after a failed normal match with current, contributing input."""
+        self.begin_recovery('normal localization unavailable; searching near trusted odometry prediction')
+        if (not self.recovery_episode or self.recovery_worker is None or
+                self.accepted_match_correction is None or
+                time.monotonic()-self.recovery_last_queued < self.p['recovery_period'] or
+                not 0 <= time.monotonic()-received <= self.p['validity_timeout']):
+            return
+        if (self.recovery_trusted_received is None or
+                time.monotonic()-self.recovery_trusted_received > self.p['recovery_reference_timeout']):
+            self.recovery_status('failed', 'trusted localization reference expired; explicit initialization required')
+            return
+        self.recovery_last_queued = time.monotonic()
+        job = RecoveryJob(self.generation, self.recovery_serial, points.copy(), odom.copy(),
+                          self.accepted_match_correction.copy(), source_odom.copy(), stamp_ns, received)
+        self.recovery_worker.submit(job)
+
+    def recovery_completed(self, job, result, elapsed, error):
+        with self.lock:
+            if (job.generation != self.generation or job.serial != self.recovery_serial or
+                    not self.recovery_episode or not self.recovery_ever_localized):
+                return False
+            if error is not None:
+                self.recovery_status('searching' if error == 'expired recovery computation' else 'failed',
+                                     error, processing_time=elapsed)
+                return False
+            age = (self.get_clock().now().nanoseconds-job.stamp_ns)/1e9
+            if (not 0 <= time.monotonic()-job.received <= min(self.p['validity_timeout'],
+                                                            self.recovery_config.max_scan_age) or
+                    not -0.1 <= age <= self.p['validity_timeout']):
+                self.recovery_status('searching', 'discarded expired recovery result', processing_time=elapsed)
+                return False
+            if (self.recovery_trusted_received is None or
+                    time.monotonic()-self.recovery_trusted_received > self.p['recovery_reference_timeout']):
+                self.recovery_status('failed', 'trusted localization reference expired; explicit initialization required')
+                return False
+            if not result.accepted:
+                self.recovery_status('confirming' if result.confirmations else 'searching', result.reason,
+                                     result.confirmations, processing_time=elapsed,
+                                     fitness=float(result.fitness), rmse=float(result.rmse))
+                return True
+            try:
+                tf = self.buffer.lookup_transform('odom', 'base_link', Time())
+                tf_stamp = Time.from_msg(tf.header.stamp)
+                odom_age = (self.get_clock().now()-tf_stamp).nanoseconds/1e9
+                if not -0.1 <= odom_age <= self.p['localization_odom_timeout']:
+                    raise ValueError('recovery awaits fresh odometry')
+                current_odom = transform_matrix(tf.transform)
+                budget = OdometryBudget()
+                budget.reset(job.source_odom, job.stamp_ns)
+                budget.observe(job.odom, job.stamp_ns)
+                if not budget.observe(current_odom, tf_stamp.nanoseconds):
+                    raise ValueError('recovery odometry clock regressed')
+                if budget.exceeded(self.p['localization_hold_distance'],
+                                   np.deg2rad(self.p['localization_hold_rotation_degrees'])):
+                    raise ValueError('recovery result motion budget exceeded')
+                correction = result.correction.copy()
+                accepted_odom = job.odom.copy()
+            except (TransformException, ValueError) as failure:
+                self.recovery_status('searching', str(failure), processing_time=elapsed)
+                return False
+            # No map, waypoint or raw odometry coordinates change here. This
+            # single correction also drives the body/footprint TF projection.
+            self.correction = correction
+            self.accepted_match_correction = correction.copy()
+            self.accepted_odom = accepted_odom
+            self.last_accepted = job.received
+            self.recovery_trusted_received = job.received
+            self.odom_budget = budget
+            self.hold_exhausted = self.last_failure = ''
+            self.seeded = self.initialized = True
+            self.generation += 1
+            self.recovery_serial += 1
+            self.recovery_episode = False
+            self.recovery_status('recovered', result.reason, result.confirmations,
+                                 source_stamp=job.stamp_ns/1e9, method='local_search',
+                                 fitness=float(result.fitness), rmse=float(result.rmse), processing_time=elapsed)
+            self.get_logger().info('Localization recovered: '+json.dumps(self.recovery_report, sort_keys=True))
+            return True
+
     def seed_initial_pose(self, message, exact_body_pose=False):
         if self.p['mode'] != 'localization' or message.header.frame_id != 'map':
             self.get_logger().warning('/initialpose is supported only in localization, frame map')
@@ -316,6 +492,11 @@ class Mapper(Node):
             self.processed_stamp = None
             self.last_failure = ''
             self.generation += 1
+            self.recovery_serial += 1
+            self.recovery_ever_localized = self.recovery_episode = False
+            self.recovery_trusted_received = None
+            self.recovery_normal_count = 0
+            self.recovery_status('manual_initialization', 'initial pose supersedes automatic recovery')
         if not self.apply_pending_initial_pose():
             self.report(f'Initial-pose hint queued for up to {INITIAL_POSE_WAIT_SECONDS:.0f}s; '
                         'waiting for fresh cloud and timestamp-aligned odometry; keep robot stationary')
@@ -347,6 +528,12 @@ class Mapper(Node):
         started = time.monotonic()
         with self.lock:
             if self.latest is None or not self.initialized or time.monotonic()-self.latest[2] > 1.0:
+                return
+            if (self.p['mode'] == 'localization' and self.recovery_episode and
+                    self.recovery_worker is not None and self.recovery_worker.busy):
+                # The independent recovery solver owns this CPU slot while
+                # localization is paused. Cloud/TF callbacks keep collecting
+                # fresh data; do not run two heavy GICP solvers concurrently.
                 return
             message, odom_base, received = self.latest
             if not self.map_point_count and time.monotonic()-self.first_received < self.p['scan_window']:
@@ -522,6 +709,9 @@ class Mapper(Node):
                 self.last_failure = ''
                 self.accepted_odom = odom_base.copy()
                 self.accepted_match_correction = new_correction.copy()
+                if self.p['mode'] == 'localization':
+                    self.normal_recovery_confirmation(new_correction, odom_base, source_received,
+                                                      Time.from_msg(source_stamp).nanoseconds, fitness, rmse)
                 # Empty latest packets can shift the window reference, but
                 # cannot move the hold's time OR motion anchor forward.
                 self.odom_budget.reset(source_odom, Time.from_msg(source_stamp).nanoseconds)
@@ -550,7 +740,15 @@ class Mapper(Node):
                 if not recoverable:
                     self.last_accepted = None
                 self.last_failure = str(error)
-                _, state, _ = self.localization_readiness()
+                valid, state, _ = self.localization_readiness()
+                if self.p['mode'] == 'localization':
+                    self.recovery_normal_count = 0
+                    if not valid:
+                        self.begin_recovery(state)
+                        if ('input_points' in locals() and len(input_points) >= 100 and
+                                'source_received' in locals()):
+                            self.queue_recovery(input_points, odom_base, source_odom, source_received,
+                                                Time.from_msg(source_stamp).nanoseconds)
             self.get_logger().warning(str(error), throttle_duration_sec=2.0)
             self.status_pub.publish(String(data=f'{error}; state={state}; {self.cloud_diagnostics()}'))
 
@@ -600,7 +798,12 @@ class Mapper(Node):
         with self.lock:
             valid = False
             if self.p['mode'] == 'localization':
+                if self.recovery_worker is not None and self.recovery_worker.last_error is not None:
+                    self.recovery_status('failed', 'recovery callback failed: '+self.recovery_worker.last_error)
+                    self.recovery_worker.last_error = None
                 valid, state, detail = self.localization_readiness()
+                if not valid:
+                    self.begin_recovery(state)
                 if state != self.localization_state or time.monotonic()-self.waiting_status_time > 2:
                     self.report(f'Localization state={state} valid={valid}; {detail}; '
                                 f'{self.cloud_status}; {self.cloud_diagnostics()}')
@@ -634,6 +837,8 @@ class Mapper(Node):
         return publish
 
     def destroy_node(self):
+        if getattr(self, 'recovery_worker', None) is not None:
+            self.recovery_worker.close()
         if getattr(self, 'loop_worker', None) is not None:
             self.loop_worker.close()
         return super().destroy_node()

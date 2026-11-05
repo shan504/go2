@@ -58,6 +58,7 @@ class MotionCheck(Node):
             'progress_checker.required_movement_angle',
             'progress_checker.movement_time_allowance'],
         'go2_edu_dds_bridge': ['enable_control', 'allow_motion', 'max_linear_speed', 'max_yaw_speed'],
+        'go2_operator': ['auto_resume_localization', 'auto_resume_stable_seconds', 'auto_resume_timeout'],
         'go2_gicp': ['scan_window', 'registration_period', 'validity_timeout',
             'localization_hold_timeout', 'localization_hold_distance',
             'localization_hold_rotation_degrees', 'localization_odom_timeout',
@@ -65,6 +66,8 @@ class MotionCheck(Node):
             'localization_max_translation', 'localization_max_rotation_degrees',
             'localization_min_fitness', 'localization_max_rmse',
             'submap_radius', 'map_voxel_size', 'map_publish_period',
+            'auto_relocalization', 'recovery_max_translation', 'recovery_max_rotation_degrees',
+            'recovery_confirmations', 'recovery_period',
             'stationary_translation_limit', 'stationary_rotation_limit_degrees'],
     }
 
@@ -94,7 +97,7 @@ class MotionCheck(Node):
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         def status_callback(topic):
             return lambda message: self.status(message, topic)
-        for topic in ('/control/status', '/operator/status', '/navigation/startup_status'):
+        for topic in ('/control/status', '/operator/status', '/navigation/startup_status', '/localization/recovery'):
             self.create_subscription(String, topic, status_callback(topic), retained)
         # Mapper status is volatile. Requesting retained durability here would
         # silently miss the reason immediately preceding a localization pause.
@@ -232,6 +235,12 @@ class MotionCheck(Node):
             key = self.localization_status_key(value)
         elif topic == '/localization/state':
             key = value.split(';', 1)[0]
+        elif topic == '/localization/recovery':
+            try:
+                recovery = json.loads(value)
+                key = (recovery.get('state'), recovery.get('epoch'), recovery.get('confirmations'), recovery.get('reason'))
+            except (ValueError, TypeError):
+                pass
         if topic not in self.status_keys or key != self.status_keys[topic]:
             self.status_keys[topic] = key
             self.status_events.append((now-self.started, topic, value))
@@ -480,7 +489,8 @@ def main():
         while time.monotonic() < discovery_end:
             rclpy.spin_once(node, timeout_sec=0.1)
         node.arm()
-        print(f'READY: recording {args.seconds}s. Now select a NEW goal and enable motion in Foxglove.', flush=True)
+        print(f'READY: recording {args.seconds}s. Observe the current route/recovery; '
+              'new goals or manual controls replace automatic recovery intent.', flush=True)
         deadline = node.started+args.seconds
         while time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.1)

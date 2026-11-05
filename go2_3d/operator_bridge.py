@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Foxglove publish-panel operations and /goal_pose -> Nav2 action gateway."""
 import copy
+import json
 import math
 import time
 from collections import deque
@@ -11,7 +12,7 @@ from rcl_interfaces.srv import SetParameters, GetParameters
 from rclpy.action import ActionClient
 from std_msgs.msg import Bool, Empty, String
 from std_srvs.srv import Trigger
-from geometry_msgs.msg import PoseStamped, PointStamped
+from geometry_msgs.msg import PoseStamped, PointStamped, PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import OccupancyGrid
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -26,6 +27,20 @@ class Operator(Node):
         super().__init__('go2_operator')
         self.declare_parameter('mode','mapping')
         self.mode = self.get_parameter('mode').value
+        self.declare_parameter('auto_resume_localization', True)
+        self.declare_parameter('auto_resume_stable_seconds', 1.0)
+        self.declare_parameter('auto_resume_timeout', 60.0)
+        self.auto_resume_enabled = self.get_parameter('auto_resume_localization').value
+        self.auto_resume_stable = float(self.get_parameter('auto_resume_stable_seconds').value)
+        self.auto_resume_timeout = float(self.get_parameter('auto_resume_timeout').value)
+        if (not math.isfinite(self.auto_resume_stable) or self.auto_resume_stable < 1.0 or
+                not math.isfinite(self.auto_resume_timeout) or self.auto_resume_timeout <= 0):
+            raise ValueError('automatic resume needs stable_seconds >= 1 and a positive timeout')
+        self.auto_resume = None
+        self.recovery_epoch = -1
+        self.recovery_state = 'idle'
+        self.pause_disable_confirmed = False
+        self.costmap_clear = {}
         self.valid = False
         self.valid_received = None
         self.localization_state = 'state not received'
@@ -54,14 +69,20 @@ class Operator(Node):
         self.action = None
         if self.mode == 'navigation':
             from nav2_msgs.action import NavigateToPose
+            from nav2_msgs.srv import ClearEntireCostmap
             self.goal_type = NavigateToPose
             self.action = ActionClient(self,NavigateToPose,'/navigate_to_pose')
+            self.clear_type = ClearEntireCostmap
+            for name in ('global', 'local'):
+                self.costmap_clear[name] = self.create_client(ClearEntireCostmap,
+                    f'/{name}_costmap/clear_entirely_{name}_costmap')
         self.save = self.create_client(Trigger,'/save_3d_map')
         self.parameters = self.create_client(SetParameters,'/go2_edu_dds_bridge/set_parameters')
         self.motion_state = self.create_client(GetParameters,'/go2_edu_dds_bridge/get_parameters')
         retained = QoSProfile(depth=1,reliability=ReliabilityPolicy.RELIABLE,
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status = self.create_publisher(String,'/operator/status',retained)
+        self.recover_localization = self.create_publisher(Empty,'/localization/recover',1)
         self.waypoint_markers = self.create_publisher(MarkerArray,'/navigation/waypoints',retained)
         if self.mode == 'navigation':
             self.create_subscription(String,'/navigation/startup_status',
@@ -71,6 +92,9 @@ class Operator(Node):
                     lambda msg,topic=topic: self.grids.__setitem__(topic,(msg,time.monotonic())),retained)
         self.create_subscription(Bool,'/localization/valid',self.on_validity,1)
         self.create_subscription(String,'/localization/state',self.on_localization_state,1)
+        self.create_subscription(String,'/localization/recovery',self.on_recovery,retained)
+        self.create_subscription(PoseWithCovarianceStamped,'/initialpose',
+            self.on_initial_pose,1)
         self.create_subscription(Empty,'/mapping/save',self.on_save,1)
         self.create_subscription(Bool,'/control/enable',self.on_enable,1)
         self.create_subscription(Empty,'/navigation/cancel',self.on_cancel,1)
@@ -130,6 +154,76 @@ class Operator(Node):
 
     def on_validity(self,message):
         self.valid, self.valid_received = message.data,time.monotonic()
+        if not message.data and self.auto_resume is not None:
+            self.auto_resume['stable_since'] = None
+
+    def clear_auto_resume(self, reason=None):
+        """Manual/new route intent supersedes the previous recovery authority."""
+        previous = self.auto_resume
+        self.auto_resume = None
+        if (previous is not None and previous['stage'] == 'enabling' and
+                self.parameters.service_is_ready()):
+            request = SetParameters.Request()
+            request.parameters = [Parameter('enable_control',value=False).to_parameter_msg()]
+            try:
+                self.parameters.call_async(request)
+            except Exception as error:
+                self.get_logger().error(f'Automatic enable revoked; bridge disable request failed: {error}')
+
+    def on_recovery(self, message):
+        try:
+            event = json.loads(message.data)
+            epoch, state = event['epoch'], event['state']
+            if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < self.recovery_epoch:
+                return
+            if state not in ('idle', 'searching', 'confirming', 'recovered', 'failed', 'manual_initialization'):
+                return
+        except (ValueError, KeyError, TypeError):
+            return
+        previous_epoch, previous_state = self.recovery_epoch, self.recovery_state
+        self.recovery_epoch, self.recovery_state = epoch, state
+        if state == 'manual_initialization':
+            # Pose and validity use independent DDS topics. Revoke authority
+            # even if this event precedes Bool(false) and no pause intent yet
+            # exists. Repeated delivery of the same event cannot veto a later
+            # explicit user enable a second time.
+            if epoch > previous_epoch or previous_state != state:
+                self.on_initial_pose(None)
+            return
+        intent = self.auto_resume
+        if intent is None:
+            return
+        if state == 'failed':
+            self.clear_auto_resume(state)
+            self.report('Automatic route recovery stopped: '+state+'; route retained; explicit enable required')
+        elif state in ('searching', 'confirming'):
+            if intent['stage'] == 'enabling':
+                self.clear_auto_resume(state)
+                return
+            intent.update(proof_epoch=None, stable_since=None, stage='waiting', clears={}, cleared_at=None)
+        elif (state == 'recovered' and epoch > intent['baseline_epoch'] and
+              isinstance(event.get('confirmations'), int) and event['confirmations'] >= 3 and
+              event.get('source_stamp') is not None and epoch != intent['proof_epoch']):
+            try:
+                stamp = float(event['source_stamp'])
+                age = self.get_clock().now().nanoseconds/1e9-stamp
+                if not math.isfinite(stamp) or not -.1 <= age <= 1.0:
+                    return
+            except (ValueError, TypeError):
+                return
+            intent['proof_epoch'] = epoch
+            intent['stable_since'] = None
+
+    def on_initial_pose(self, message):
+        if self.mode != 'navigation':
+            return
+        self.clear_auto_resume('manual initial pose')
+        # Remove the prior user's executing-route authority BEFORE invoking
+        # the shared pause path, so it cannot create automatic resume intent.
+        self.route_started = False
+        self.pause_for_localization()
+        self.route_pause_reason = 'manual_initialization'
+        self.report('Route paused: manual initial pose; waypoints retained; explicit enable required after localization recovers')
 
     def on_localization_state(self, message):
         self.localization_state, self.localization_state_received = message.data, time.monotonic()
@@ -146,6 +240,7 @@ class Operator(Node):
         if not self.localized() and (self.goal_handle is not None or self.goal_pending or self.waiting_goal is not None):
             if not self.route_paused:
                 self.pause_for_localization()
+        self.try_automatic_resume()
         if self.enable_query is not None and time.monotonic()-self.enable_query[2] > 2.0:
             future,_,_ = self.enable_query
             self.enable_query = None
@@ -154,12 +249,21 @@ class Operator(Node):
             self.report('Goal rejected: motion bridge state query timed out')
 
     def pause_for_localization(self):
-        # Retain map waypoints, but stop/cancel the action. Recovery alone
-        # never resumes motion: the user must explicitly enable the route.
+        # Only an already executing, explicitly enabled route grants recovery
+        # authority. A collected route or bootstrap can never start itself.
+        recover_running = (self.auto_resume_enabled and self.mode == 'navigation' and
+                           self.route_started and not self.route_paused and
+                           (self.goal_handle is not None or self.goal_pending or
+                            self.inflight_waypoint is not None or self.enable_query is not None))
         self.goal_generation += 1
         self.route_started = False
         self.route_paused = True
         self.route_pause_reason = 'localization'
+        self.pause_disable_confirmed = False
+        self.auto_resume = (dict(generation=self.goal_generation, motion_generation=self.motion_generation,
+            started=time.monotonic(), baseline_epoch=self.recovery_epoch, proof_epoch=None,
+            stable_since=None, stage='waiting', clears={}, cleared_at=None)
+            if recover_running else None)
         self.localization_pause_detail = self.localization_loss_detail()
         if self.inflight_waypoint is not None:
             self.waypoints.appendleft(self.inflight_waypoint)
@@ -187,12 +291,124 @@ class Operator(Node):
                     results = result.result().results
                     if len(results)!=1 or not results[0].successful:
                         self.report('Route paused; motion bridge disable rejected; action cancellation requested')
+                    else:
+                        self.pause_disable_confirmed = True
                 except Exception as error:
                     self.report(f'Route paused; motion bridge disable failed: {error}; action cancellation requested')
             future.add_done_callback(disabled)
         self.cancel_active_goal()
+        if self.auto_resume is not None:
+            self.recover_localization.publish(Empty())
         self.report('Route paused: live localization lost; '+self.localization_pause_detail+
-                    '; waypoints retained; enable motion after localization recovers')
+                    ('; waypoints retained; automatic resume awaits verified recovery, stable TF and cleared costmaps'
+                     if self.auto_resume is not None else
+                     '; waypoints retained; enable motion after localization recovers'))
+
+    def validate_recovered_route(self, require_costmaps=True):
+        """Require both the retained target and the recovered body to be free."""
+        if require_costmaps:
+            self.validate_goal(self.waiting_goal)
+        else:
+            self.validate_map_goal(self.waiting_goal)
+        topics = ('/map', '/global_costmap/costmap', '/local_costmap/costmap') if require_costmaps else ('/map',)
+        for topic in topics:
+            grid, _ = self.grids[topic]
+            transform = self.buffer.lookup_transform(grid.header.frame_id,'base_footprint',Time())
+            age = (self.get_clock().now()-Time.from_msg(transform.header.stamp)).nanoseconds/1e9
+            if not -0.1 <= age <= .5:
+                raise ValueError('recovered robot TF is stale')
+            xy = [transform.transform.translation.x, transform.transform.translation.y]
+            cell = grid_cell(grid, xy)
+            if cell is None:
+                raise ValueError(f'{topic}: recovered robot is outside grid')
+            value = grid.data[cell[1]*grid.info.width+cell[0]]
+            if value < 0 or value >= 99:
+                raise ValueError(f'{topic}: recovered robot cell is not free')
+
+    def try_automatic_resume(self):
+        intent = self.auto_resume
+        if intent is None:
+            return
+        if (intent['generation'] != self.goal_generation or intent['motion_generation'] != self.motion_generation or
+                not self.route_paused or self.route_pause_reason != 'localization' or not self.waypoints):
+            self.clear_auto_resume()
+            return
+        now = time.monotonic()
+        if now-intent['started'] > self.auto_resume_timeout:
+            self.clear_auto_resume()
+            self.report('Automatic recovery wait expired; route retained; explicit enable required')
+            return
+        if not self.localized():
+            intent['stable_since'] = None
+            if intent['stage'] == 'enabling':
+                self.clear_auto_resume()
+                self.report('Automatic resume stopped: localization lost during enable; explicit enable required')
+            elif intent['proof_epoch'] is not None:
+                # A second loss invalidates proof from the first recovery.
+                # In particular a heartbeat gap needs a new mapper request
+                # even when its own sensor validity never became false.
+                intent.update(proof_epoch=None, baseline_epoch=self.recovery_epoch,
+                              stage='waiting', clears={}, cleared_at=None)
+                self.recover_localization.publish(Empty())
+            return
+        if (intent['proof_epoch'] is None or not self.pause_disable_confirmed or
+                self.pause_disable_future is not None or self.goal_handle is not None or
+                self.goal_pending or self.cancelling or not self.action.server_is_ready()):
+            return
+        try:
+            # Old rolling grids can contain ghosts at the previous pose.
+            # Clear them after the static map/TF gate, then validate all NEW
+            # costmaps before restoring any movement authority.
+            self.validate_recovered_route(require_costmaps=intent['stage'] in ('refreshing', 'enabling'))
+        except (ValueError, TransformException, KeyError):
+            intent['stable_since'] = None
+            return
+        if intent['stable_since'] is None:
+            intent['stable_since'] = now
+            return
+        if now-intent['stable_since'] < self.auto_resume_stable:
+            return
+        if intent['stage'] == 'waiting':
+            if not all(client.service_is_ready() for client in self.costmap_clear.values()):
+                if not intent.get('missing_clear_reported'):
+                    intent['missing_clear_reported'] = True
+                    self.report('Automatic resume waiting: Nav2 clear-costmap services unavailable; '
+                                'route retained; explicit enable remains available after localization recovers')
+                return
+            intent['stage'] = 'clearing'
+            try:
+                for name, client in self.costmap_clear.items():
+                    future = client.call_async(self.clear_type.Request())
+                    intent['clears'][name] = future
+            except Exception as error:
+                self.clear_auto_resume()
+                self.report(f'Automatic resume stopped: cannot clear costmaps: {error}; explicit enable required')
+                return
+            self.report('Verified localization recovery; clearing both Nav2 costmaps before route resume')
+            return
+        if intent['stage'] == 'clearing':
+            if not all(future.done() for future in intent['clears'].values()):
+                return
+            try:
+                for future in intent['clears'].values():
+                    if future.result() is None:
+                        raise ValueError('missing costmap clear response')
+            except Exception as error:
+                self.clear_auto_resume()
+                self.report(f'Automatic resume stopped: costmap clear failed: {error}; explicit enable required')
+                return
+            intent['stage'] = 'refreshing'
+            intent['cleared_at'] = now
+            intent['cleared_stamp'] = self.get_clock().now().nanoseconds
+            return
+        if intent['stage'] == 'refreshing':
+            for topic in ('/global_costmap/costmap', '/local_costmap/costmap'):
+                grid, received = self.grids[topic]
+                if (received <= intent['cleared_at'] or
+                        Time.from_msg(grid.header.stamp).nanoseconds < intent['cleared_stamp']):
+                    return
+            intent['stage'] = 'enabling'
+            self.on_enable(Bool(data=True), automatic=True)
 
     def on_save(self,message):
         if self.mode != 'mapping':
@@ -210,8 +426,13 @@ class Operator(Node):
                 self.report(f'Save failed: {error}')
         future.add_done_callback(done)
 
-    def on_enable(self,message):
-        self.motion_generation += 1
+    def on_enable(self,message,automatic=False):
+        intent = self.auto_resume if automatic else None
+        if automatic and intent is None:
+            return
+        if not automatic:
+            self.clear_auto_resume('manual enable/disable')
+            self.motion_generation += 1
         generation = self.motion_generation
         route_generation = self.goal_generation
         enabled = bool(message.data)
@@ -221,15 +442,23 @@ class Operator(Node):
             self.on_cancel(Empty())
             route_generation = self.goal_generation
         if message.data and (self.mode != 'navigation' or not self.localized()):
+            if automatic:
+                self.clear_auto_resume()
             self.report('Enable rejected: navigation mode and live GICP localization required')
             return
         if enabled and self.pause_disable_future is not None:
+            if automatic:
+                self.clear_auto_resume()
             self.report('Enable deferred: waiting for paused motion to disable; enable again after it stops')
             return
         if enabled and not self.action.server_is_ready():
+            if automatic:
+                self.clear_auto_resume()
             self.report(f'Enable rejected: Nav2 NavigateToPose action unavailable; {self.startup_status}')
             return
         if not self.parameters.service_is_ready():
+            if automatic:
+                self.clear_auto_resume()
             self.report('Motion bridge parameter service unavailable')
             return
         request = SetParameters.Request()
@@ -238,23 +467,36 @@ class Operator(Node):
         def done(result):
             if generation != self.motion_generation or route_generation != self.goal_generation:
                 return
+            if automatic and self.auto_resume is not intent:
+                return
             try:
                 results = result.result().results
                 accepted = len(results)==1 and results[0].successful
                 text = 'Motion enable=%s; parameter accepted=%s' % (enabled,accepted)
                 if not accepted:
+                    if automatic:
+                        self.clear_auto_resume()
                     text += '; '+('; '.join(r.reason for r in results) or 'missing parameter result')
                 elif start_route and self.waiting_goal is not None:
                     if not self.localized():
-                        if not self.route_paused:
-                            self.pause_for_localization()
+                        self.pause_for_localization()
                         return
-                    if self.route_paused and self.route_pause_reason != 'localization':
+                    if automatic:
+                        try:
+                            self.validate_recovered_route()
+                        except (ValueError, TransformException, KeyError) as error:
+                            self.clear_auto_resume()
+                            self.report(f'Automatic resume stopped: {error}; route retained; explicit enable required')
+                            return
+                    if self.route_paused and self.route_pause_reason not in ('localization', 'manual_initialization'):
                         self.report(text+'; previous goal failed; fix route and send a new goal after cancelling, or tools.sh resume to retry; route paused')
                         return
                     self.route_paused = False
                     self.route_pause_reason = None
                     self.route_started = True
+                    if automatic:
+                        self.auto_resume = None
+                        text += '; verified automatic localization recovery; retrying retained waypoint'
                     self.report(text)
                     self.check_motion_state()
                     return
@@ -263,10 +505,13 @@ class Operator(Node):
                              else '; no active navigation goal; select /goal_pose waypoints then enable motion to start')
                 self.report(text)
             except Exception as error:
+                if automatic:
+                    self.clear_auto_resume()
                 self.report(f'Motion parameter failed: {error}')
         future.add_done_callback(done)
 
     def on_cancel(self,message):
+        self.clear_auto_resume('manual cancel')
         self.goal_generation += 1
         self.route_paused = False
         self.route_pause_reason = None
@@ -292,6 +537,7 @@ class Operator(Node):
             future.add_done_callback(lambda f: self.report('Navigation cancel response received'))
 
     def on_resume(self,message):
+        self.clear_auto_resume('manual resume')
         if not self.route_paused or not self.waypoints:
             self.report('No paused waypoint route to resume')
             return
@@ -338,6 +584,7 @@ class Operator(Node):
         except (ValueError,TransformException) as error:
             self.report(f'Goal rejected: {error}')
             return
+        self.clear_auto_resume('new waypoint')
         # New routes are collected until an explicit Enable, even if the
         # bridge remained enabled after the previous route completed.
         if not self.waypoints and self.inflight_waypoint is None:
@@ -482,6 +729,7 @@ class Operator(Node):
     def pause_waypoint(self,waypoint,generation):
         self.inflight_waypoint = None
         if generation == self.goal_generation:
+            self.clear_auto_resume('navigation failure')
             self.waypoints.appendleft(waypoint)
             self.route_paused = True
             self.route_started = False
@@ -492,6 +740,7 @@ class Operator(Node):
         try:
             handle = future.result()
             if not handle.accepted:
+                self.clear_auto_resume('navigation rejected')
                 self.pause_waypoint(waypoint,generation)
                 self.report('Nav2 rejected goal; route paused; publish /navigation/resume to retry')
                 if generation != self.goal_generation and self.route_started:
@@ -506,6 +755,7 @@ class Operator(Node):
             elif not self.localized():
                 self.pause_for_localization()
         except Exception as error:
+            self.clear_auto_resume('navigation goal response failed')
             self.pause_waypoint(waypoint,generation)
             self.report(f'Nav2 goal request failed: {error}')
             if generation != self.goal_generation and self.route_started:
@@ -530,6 +780,8 @@ class Operator(Node):
         try:
             status = future.result().status
             self.last_goal_status = status
+            if status not in (4,5):
+                self.clear_auto_resume('navigation failed during localization pause')
             current = generation == self.goal_generation
             if current and status == 4:
                 self.completed_waypoints += 1
@@ -542,7 +794,9 @@ class Operator(Node):
                 text += ' (ABORTED); no active goal; enabling motion does not retry the failed goal'
             elif status==5:
                 text += (' (CANCELED); localization pause; waypoints retained'
-                         if self.route_pause_reason == 'localization' else ' (CANCELED); route cancelled')
+                         if self.route_pause_reason == 'localization' else
+                         ' (CANCELED); manual initial pose; waypoints retained'
+                         if self.route_pause_reason == 'manual_initialization' else ' (CANCELED); route cancelled')
                 if self.route_pause_reason == 'localization':
                     text += '; '+self.localization_pause_detail
             if current and status==4 and not self.waypoints:
@@ -555,6 +809,7 @@ class Operator(Node):
             if self.route_started and not self.route_paused:
                 self.check_motion_state()
         except Exception as error:
+            self.clear_auto_resume('navigation result failed')
             self.pause_waypoint(waypoint,generation)
             self.report(f'Nav2 result failed: {error}')
 

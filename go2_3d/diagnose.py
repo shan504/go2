@@ -31,6 +31,7 @@ class Diagnostics(Node):
             '/point_cloud2':PointCloud2,'/registered_cloud':PointCloud2,'/odom':Odometry,'/map_cloud':PointCloud2,
             '/camera/image/compressed':CompressedImage,
             '/localization/status':String,'/localization/valid':Bool,
+            '/localization/recovery':String,
         }
         for topic,kind in self.types.items():
             def receive(message,topic=topic):
@@ -38,7 +39,7 @@ class Diagnostics(Node):
                 self.counts[topic] = self.counts.get(topic,0)+1
                 self.received[topic] = time.monotonic()
             self.create_subscription(kind,topic,receive,
-                                     self.retained if topic == '/map_cloud' else qos_profile_sensor_data)
+                                     self.retained if topic in ('/map_cloud','/localization/recovery') else qos_profile_sensor_data)
         self.create_timer(0.05,self.sample_tf)
 
     def sample_tf(self):

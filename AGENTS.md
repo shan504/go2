@@ -22,3 +22,9 @@ to repair one map in place of fixing the shared processing path.
   full saved start pose across map saves, leveling and repeated loads. Explicit
   coordinates or manual initialpose can override it; automatic initialization
   still requires accepted GICP and does not enable motion by itself.
+- A previously user-enabled, executing route paused only for localization loss
+  may resume automatically after fresh multi-scan recovery proof, stable valid
+  localization, completed cancellation/bridge disable, refreshed costmaps and
+  free-space validation. Manual stop/cancel, manual initialpose, new route
+  intent, failed navigation goals, startup and merely queued goals do not grant
+  automatic motion authority. Preserve these limits in future recovery changes.
