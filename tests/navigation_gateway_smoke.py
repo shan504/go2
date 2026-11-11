@@ -159,8 +159,8 @@ if __name__ == '__main__':
         time.sleep(0.2)
         assert endpoints.goals == 0 and not operator.waypoints
         pose.header.frame_id = 'map'
-        # Static-map obstacles reject collection. Live clearance is checked
-        # when execution starts, so it cannot discard an intended waypoint.
+        # Collection retains the exact intended waypoint even on a blocked
+        # static cell. Static and live clearance still block execution.
         for topic,value in (('/map',100),('/local_costmap/costmap',99)):
             _,grid = endpoints.grids[topic]
             # ROS wire resolution is float32; use the received geometry so
@@ -170,16 +170,14 @@ if __name__ == '__main__':
             grid.data[index] = value
             wait_for(lambda: operator.grids[topic][0].data[index]==value)
             endpoints.goal.publish(pose)
+            wait_for(lambda: len(operator.waypoints)==1)
             if topic=='/map':
-                wait_for(lambda: 'Goal rejected: /map:' in endpoints.operator_status)
-                assert not operator.waypoints
-            else:
-                wait_for(lambda: len(operator.waypoints)==1)
-                endpoints.enable.publish(Bool(data=True))
-                wait_for(lambda: operator.route_pause_reason=='validation')
-                assert operator.waiting_goal.pose.position.x==1.0
-                endpoints.cancel.publish(Empty())
-                wait_for(lambda: not operator.waypoints and not operator.route_paused)
+                wait_for(lambda: 'queued; execution requires a free goal cell' in endpoints.operator_status)
+            endpoints.enable.publish(Bool(data=True))
+            wait_for(lambda: operator.route_pause_reason=='validation')
+            assert operator.waiting_goal.pose.position.x==1.0
+            endpoints.cancel.publish(Empty())
+            wait_for(lambda: not operator.waypoints and not operator.route_paused)
             assert endpoints.goals == 0,f'{topic} blocked goal reached Nav2'
             grid.data[index] = 0
             wait_for(lambda: operator.grids[topic][0].data[index]==0)
@@ -188,7 +186,8 @@ if __name__ == '__main__':
         endpoints.goal.publish(pose)
         wait_for(lambda: len(operator.waypoints)==1)
         endpoints.enable.publish(Bool(data=True))
-        wait_for(lambda: operator.route_pause_reason=='validation')
+        wait_for(lambda: operator.route_started and not operator.route_paused and
+                 'TF stale' in operator.dispatch_wait_reason)
         assert endpoints.goals == 0,'A true validity flag with stale TF allowed a goal'
         assert operator.waiting_goal.pose.position.x==1.0
         endpoints.cancel.publish(Empty())
