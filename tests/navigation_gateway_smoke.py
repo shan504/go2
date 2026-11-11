@@ -188,7 +188,8 @@ if __name__ == '__main__':
         endpoints.goal.publish(pose)
         wait_for(lambda: len(operator.waypoints)==1)
         endpoints.enable.publish(Bool(data=True))
-        wait_for(lambda: operator.route_pause_reason=='validation')
+        wait_for(lambda: 'Waypoint dispatch waiting:' in endpoints.operator_status)
+        assert operator.route_started and not operator.route_paused
         assert endpoints.goals == 0,'A true validity flag with stale TF allowed a goal'
         assert operator.waiting_goal.pose.position.x==1.0
         endpoints.cancel.publish(Empty())

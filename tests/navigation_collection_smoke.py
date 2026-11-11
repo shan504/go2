@@ -75,9 +75,13 @@ def main():
                  not endpoints.get_parameter('enable_control').value and
                  operator.pause_disable_future is None)
 
-    def blocked(reason):
+    def blocked(reason, transient=True):
         endpoints.enable.publish(Bool(data=True))
-        wait_for(lambda: operator.route_pause_reason == 'validation')
+        if transient:
+            wait_for(lambda: 'Waypoint dispatch waiting:' in endpoints.operator_status)
+            assert operator.route_started and not operator.route_paused
+        else:
+            wait_for(lambda: operator.route_pause_reason == 'validation')
         wait_for(lambda: reason in endpoints.operator_status)
         assert endpoints.goals == 0 and endpoints.positions == []
         assert queued() == xs, 'Execution readiness discarded the collected route'
@@ -163,7 +167,7 @@ def main():
         local.data[index] = 99
         wait_for(lambda: operator.grids['/local_costmap/costmap'][0].data[index] == 99)
         collect(first_point=True)
-        blocked('inside obstacle clearance')
+        blocked('inside obstacle clearance', transient=False)
         local.data[index] = 0
         wait_for(lambda: operator.grids['/local_costmap/costmap'][0].data[index] == 0)
 
