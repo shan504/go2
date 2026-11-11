@@ -64,7 +64,7 @@ class Mapper(Node):
                         scan_window=0.0, map_publish_period=2.0,
                         grid_resolution=0.10, floor_z=-0.30,
                         obstacle_min_height=0.10, obstacle_max_height=1.5,
-                        max_map_points=200000, submap_radius=25.0,
+                        max_map_points=10000000, submap_radius=25.0,
                         registration_period=0.5, validity_timeout=1.0,
                         correspondence_distance=0.7, min_fitness=0.55, max_rmse=0.20,
                         max_translation=0.6, max_rotation=0.35,

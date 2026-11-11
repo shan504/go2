@@ -51,7 +51,10 @@ def generate_launch_description():
         DeclareLaunchArgument('initial_yaw_degrees',default_value='0.0'),
         DeclareLaunchArgument('topic_whitelist',default_value=whitelist),
         DeclareLaunchArgument('capabilities',default_value='[clientPublish,services,parameters,parametersSubscribe,connectionGraph,assets]'),
-        DeclareLaunchArgument('send_buffer_limit',default_value='33554432'),
+        # 10,000,000 XYZ float32 points need 120 MB per complete map frame.
+        # Legacy byte-budget bridges can hold two frames plus overhead.
+        # SDK/Rust bridges use a message-count queue instead (see capacity doc).
+        DeclareLaunchArgument('send_buffer_limit',default_value='268435456'),
         Node(executable='/usr/bin/python3',name='go2_edu_dds_bridge',output='screen',
              arguments=[str(root/'go2_3d/control_bridge.py')],parameters=[{'enable_control':False,
                  'allow_motion':ParameterValue(PythonExpression(["'",mode,"' == 'navigation'"]),value_type=bool)}]),
@@ -87,5 +90,6 @@ def generate_launch_description():
                                                    # Humble evaluates this inside PythonExpression(['not ', ...]).
                                                    'autostart':'false','use_composition':'False'}.items()),
         ]),
-        IncludeLaunchDescription(FrontendLaunchDescriptionSource(str(Path(get_package_share_directory('foxglove_bridge'))/'launch/foxglove_bridge_launch.xml'))),
+        IncludeLaunchDescription(FrontendLaunchDescriptionSource(str(Path(get_package_share_directory('foxglove_bridge'))/'launch/foxglove_bridge_launch.xml')),
+            launch_arguments={'send_buffer_limit': LaunchConfiguration('send_buffer_limit')}.items()),
     ])

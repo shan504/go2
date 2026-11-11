@@ -160,7 +160,7 @@ def phase(directory,mode,dense=False,auto=False):
             assert packed.point_step == 12 and len(packed.data) == packed.width*12
             if dense:
                 assert mapper.p['map_voxel_size'] == 0.02
-                assert mapper.p['max_map_points'] == 1000000
+                assert mapper.p['max_map_points'] == 10000000
                 assert len(mapper.history)>1
             truth = pose_matrix([0.40,0.0,0.0],[0,0,0,1])
             odom = pose_matrix([0.48,0.03,0.0],[0,0,0,1])

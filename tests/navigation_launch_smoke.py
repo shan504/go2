@@ -12,7 +12,8 @@ from launch import LaunchContext, LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction, OpaqueFunction
 from launch_ros.actions import SetRemap
 from launch_ros.utilities import evaluate_parameters
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
+from launch.utilities import perform_substitutions, normalize_to_list_of_substitutions
 
 
 nav2_share = os.environ.get('GO2_NAV2_SHARE_DIR') or get_package_share_directory('nav2_bringup')
@@ -36,6 +37,17 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
         for action in description.entities:
             if isinstance(action, DeclareLaunchArgument):
                 action.execute(context)
+        foxglove = next(action for action in description.entities
+                        if isinstance(action, IncludeLaunchDescription) and
+                        isinstance(action.launch_description_source, FrontendLaunchDescriptionSource))
+        bridge_arguments = dict(foxglove.launch_arguments)
+        buffer_argument = normalize_to_list_of_substitutions(bridge_arguments['send_buffer_limit'])
+        assert int(perform_substitutions(context, buffer_argument)) == 268435456
+        # An explicit operator override must still propagate to the included
+        # bridge, rather than silently using its smaller upstream default.
+        context.launch_configurations['send_buffer_limit'] = '536870912'
+        assert perform_substitutions(context, buffer_argument) == '536870912'
+        context.launch_configurations['send_buffer_limit'] = '268435456'
         mapper_action = next(action for action in description.entities if isinstance(action, OpaqueFunction))
         for profile in ('standard', 'dense'):
             context.launch_configurations['gicp_params'] = str(
@@ -56,7 +68,7 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
             expected_window = 0.0 if mode == 'mapping' and profile == 'standard' else 0.5
             assert values.get('scan_window', 0.0) == expected_window, (mode, profile, values)
             assert values['map_voxel_size'] == (0.02 if profile == 'dense' else 0.06)
-            assert values['max_map_points'] == (1000000 if profile == 'dense' else 200000)
+            assert values['max_map_points'] == 10000000
             assert values['localization_voxel_size'] == 0.10
             assert values['grid_resolution'] == 0.10
             assert values['localization_correspondence'] == 0.70
@@ -89,6 +101,7 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
             rclpy.init(args=arguments)
             probe = RosNode('go2_gicp')
             try:
+                assert probe.declare_parameter('max_map_points', 0).value == 10000000
                 for name in ('scan_window', 'map_voxel_size', 'validity_timeout',
                              'localization_hold_timeout', 'localization_hold_distance',
                              'localization_hold_rotation_degrees', 'localization_odom_timeout',
