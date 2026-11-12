@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Foxglove publish-panel operations and /goal_pose -> Nav2 action gateway."""
 import copy
+import hashlib
 import json
 import math
 import time
 from collections import deque
+from pathlib import Path
+from uuid import UUID
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -20,6 +23,7 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformListener, TransformException
 from geometry import pose_matrix, grid_cell, quaternion_from_matrix, planar_pose
 from motion_profile import ARRIVAL_RADIUS
+from route_store import map_identity, validate_route
 
 
 class DispatchNotReady(ValueError):
@@ -31,6 +35,16 @@ class Operator(Node):
         super().__init__('go2_operator')
         self.declare_parameter('mode','mapping')
         self.mode = self.get_parameter('mode').value
+        self.declare_parameter('route_map_directory', '/runtime/navigation_map')
+        # Hash the prepared map once, before subscriptions/control callbacks.
+        # A missing map only disables route-file operations (e.g. old fixtures).
+        self.route_map = None
+        self.route_map_error = ''
+        if self.mode == 'navigation':
+            try:
+                self.route_map = map_identity(Path(self.get_parameter('route_map_directory').value))
+            except Exception as error:
+                self.route_map_error = str(error)
         self.declare_parameter('auto_resume_localization', True)
         self.declare_parameter('auto_resume_stable_seconds', 1.0)
         self.declare_parameter('auto_resume_timeout', 60.0)
@@ -58,6 +72,11 @@ class Operator(Node):
         self.cancelling = False
         self.last_goal_status = None
         self.waypoints = deque()
+        # Reusable plan history is separate from the execution queue. It can
+        # be saved after completion/cancel, but never authorizes resuming it.
+        self.planned_route = []
+        self.planned_route_overflow = False
+        self.route_requests = {}
         self.inflight_waypoint = None
         self.route_paused = False
         self.route_pause_reason = None
@@ -93,6 +112,8 @@ class Operator(Node):
         self.status = self.create_publisher(String,'/operator/status',retained)
         self.recover_localization = self.create_publisher(Empty,'/localization/recover',1)
         self.waypoint_markers = self.create_publisher(MarkerArray,'/navigation/waypoints',retained)
+        self.route_results = self.create_publisher(String,'/navigation/route/result',10)
+        self.create_subscription(String,'/navigation/route/command',self.on_route_command,10)
         if self.mode == 'navigation':
             self.create_subscription(String,'/navigation/startup_status',
                 lambda msg: setattr(self,'startup_status',msg.data),retained)
@@ -684,6 +705,112 @@ class Operator(Node):
         pose.pose.orientation.w = 1.0
         self.on_goal(pose)
 
+    @staticmethod
+    def stored_waypoint(message):
+        p,q = message.pose.position,message.pose.orientation
+        return dict(position=[p.x,p.y,p.z],orientation=[q.x,q.y,q.z,q.w])
+
+    def on_route_command(self,message):
+        """Atomically import a local-file plan, or snapshot its full history.
+
+        Commands are volatile and deduplicated so a client's retry cannot
+        start the same route twice. File IO lives in the CLI, not this node.
+        """
+        request_id = ''
+        fingerprint = None
+        try:
+            if len(message.data.encode('utf-8')) > 131072:
+                raise ValueError('Route command exceeds 128 KiB')
+            request = json.loads(message.data)
+            if not isinstance(request,dict):
+                raise ValueError('Route command must be a JSON object')
+            raw_id = request.get('request_id','')
+            # Error replies must remain serializable even for NaN/list IDs.
+            request_id = raw_id if isinstance(raw_id,str) else ''
+            if not request_id or str(UUID(request_id)) != request_id:
+                raise ValueError('Route command needs a canonical UUID request_id')
+            fingerprint = hashlib.sha256(json.dumps(request,sort_keys=True,
+                separators=(',',':'),allow_nan=False).encode()).hexdigest()
+            previous = self.route_requests.get(request_id)
+            if previous is not None:
+                if previous[0] != fingerprint:
+                    raise ValueError('request_id was already used for a different command')
+                self.route_results.publish(String(data=previous[1]))
+                return
+            command = request.get('command')
+            if command not in ('snapshot','load','run'):
+                raise ValueError('Route command must be snapshot, load or run')
+            allowed = {'request_id','command'} | ({'route'} if command != 'snapshot' else set())
+            if set(request) != allowed:
+                raise ValueError('Unexpected or missing route command fields')
+            if self.mode != 'navigation':
+                raise ValueError('Route commands require navigation mode')
+            if self.route_map is None:
+                raise ValueError('Running map identity unavailable; restart navigation with a prepared map: '+self.route_map_error)
+            if command == 'snapshot':
+                if self.planned_route_overflow:
+                    raise ValueError('Complete route exceeds the 100-point file limit; no partial route was saved')
+                route = validate_route(dict(schema_version=1,map=self.route_map,
+                    waypoints=self.planned_route),expected_map=self.route_map)
+                result = dict(request_id=request_id,success=True,
+                    message=f'Full route snapshot: {len(route["waypoints"])} points; motion unchanged',route=route)
+            else:
+                if (self.waypoints or self.inflight_waypoint is not None or
+                        self.goal_handle is not None or self.goal_pending or self.cancelling or
+                        self.route_paused or self.route_started or
+                        self.enable_query is not None or self.pause_disable_future is not None or
+                        self.auto_resume is not None):
+                    raise ValueError('Existing route is busy or not empty; finish or explicitly cancel it before loading')
+                route = validate_route(request['route'],expected_map=self.route_map)
+                # Validate every point before changing any queue/history.
+                poses = []
+                for point in route['waypoints']:
+                    pose = PoseStamped()
+                    pose.header.frame_id = 'map'
+                    pose.header.stamp = self.get_clock().now().to_msg()
+                    p,q = pose.pose.position,pose.pose.orientation
+                    p.x,p.y,p.z = map(float,point['position'])
+                    q.x,q.y,q.z,q.w = map(float,point['orientation'])
+                    self.validate_map_goal(pose,require_free=False)
+                    poses.append(pose)
+                if command == 'run':
+                    if not self.localized():
+                        raise ValueError('Run requires live GICP localization; load the route without running if localization is pending')
+                    if not self.action.server_is_ready() or not self.parameters.service_is_ready():
+                        raise ValueError('Run requires the Nav2 action and motion bridge parameter service')
+                self.clear_auto_resume('saved route loaded')
+                self.goal_generation += 1
+                self.motion_generation += 1
+                self.waypoints = deque(enumerate(poses,1))
+                self.planned_route = copy.deepcopy(route['waypoints'])
+                self.planned_route_overflow = False
+                self.waypoint_number = len(poses)
+                self.completed_waypoints = 0
+                self.last_goal_status = None
+                self.cancel_requested = False
+                self.last_auto_resume_revocation = ''
+                self.route_paused = self.route_started = False
+                self.route_pause_reason = None
+                self.reset_dispatch_wait()
+                self.report(f'Saved route loaded: {len(poses)} points; explicit enable required')
+                if command == 'run':
+                    # Use the original enable/readback/TF/costmap/action path.
+                    # Its service response is asynchronous; do not claim success.
+                    self.on_enable(Bool(data=True))
+                result = dict(request_id=request_id,success=True,points=len(poses),
+                    start_requested=command=='run',message=(
+                        'Route loaded; start requested, subject to motion enable, localization and costmap checks'
+                        if command=='run' else 'Route loaded; motion was not enabled'))
+        except (ValueError,TypeError,KeyError,OSError,RecursionError,OverflowError,TransformException) as error:
+            result = dict(request_id=request_id,success=False,message=str(error))
+        encoded = json.dumps(result,sort_keys=True,allow_nan=False)
+        # Do not overwrite an earlier successful result on an ID collision.
+        if request_id and fingerprint and request_id not in self.route_requests:
+            self.route_requests[request_id] = (fingerprint,encoded)
+            if len(self.route_requests)>128:
+                del self.route_requests[next(iter(self.route_requests))]
+        self.route_results.publish(String(data=encoded))
+
     def on_goal(self,message):
         if self.action is None:
             self.report('Goal rejected: navigation mode required')
@@ -716,8 +843,14 @@ class Operator(Node):
         # bridge remained enabled after the previous route completed.
         if not self.waypoints and self.inflight_waypoint is None:
             self.waypoint_number = self.completed_waypoints = 0
+            self.planned_route = []
+            self.planned_route_overflow = False
         self.waypoint_number += 1
         self.waypoints.append((self.waypoint_number,copy.deepcopy(message)))
+        if len(self.planned_route)<100:
+            self.planned_route.append(self.stored_waypoint(message))
+        else:
+            self.planned_route_overflow = True
         notice = (f'; queued; execution requires a free goal cell (/map value={map_value})'
                   if map_value < 0 or map_value >= 99 else '')
         self.report(f'Waypoint #{self.waypoint_number} appended at ({message.pose.position.x:.2f}, {message.pose.position.y:.2f}){notice}')

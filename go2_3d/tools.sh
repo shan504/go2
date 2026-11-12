@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-check}" in
+  route-save|route-load|route-run)
+    [[ $# == 2 || ( "$1" == route-save && $# == 3 && "$3" == --overwrite ) ]] || {
+      echo 'Usage: tools.sh route-save NAME [--overwrite] | route-load NAME | route-run NAME' >&2; exit 2;
+    }
+    if [[ "$(sudo docker inspect --format '{{.State.Running}}' go2-3d 2>/dev/null || true)" != true ]]; then
+      echo 'Start navigation for the route map first, then run this command in a second SSH terminal.' >&2
+      exit 1
+    fi
+    sudo docker exec go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && python3 /opt/go2_project/go2_3d/route_cli.py "$@"' bash "${1#route-}" "${@:2}"
+    ;;
+  route-list|route-show)
+    [[ ( "$1" == route-list && $# == 1 ) || ( "$1" == route-show && $# == 2 ) ]] || {
+      echo 'Usage: tools.sh route-list | route-show NAME' >&2; exit 2;
+    }
+    project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+    sudo docker image inspect go2-3d:edu >/dev/null
+    sudo docker run --rm --pull=never --network none --entrypoint /usr/bin/python3 \
+      -v "$project_dir:/opt/go2_project:ro" -v "$project_dir/maps:/maps:ro" \
+      go2-3d:edu /opt/go2_project/go2_3d/route_cli.py "${1#route-}" "${@:2}"
+    ;;
   archive-map|use-map|maps)
     project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
     case "$1" in
@@ -129,5 +149,5 @@ PY
   shell)
     sudo docker exec -it go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec bash --norc'
     ;;
-  *) echo 'Usage: tools.sh [archive-map NAME [--all]|use-map NAME [VERSION]|maps|resume|cancel|restart-navigation [standard|dense]|export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|drivecheck-native|drivecheck-balanced|drivecheck-walk|save|enable|disable|shell]' >&2; exit 2 ;;
+  *) echo 'Usage: tools.sh [route-save NAME [--overwrite]|route-load NAME|route-run NAME|route-list|route-show NAME|archive-map NAME [--all]|use-map NAME [VERSION]|maps|resume|cancel|restart-navigation [standard|dense]|export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|drivecheck-native|drivecheck-balanced|drivecheck-walk|save|enable|disable|shell]' >&2; exit 2 ;;
 esac
