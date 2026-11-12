@@ -4,6 +4,7 @@
 No motion requests and no guessed decoding of /frontvideostream.
 """
 import time
+import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -16,14 +17,17 @@ from camera_reply import sample_response
 class CameraSample(Node):
     def __init__(self):
         super().__init__("go2_camera_sample")
+        rate = float(self.declare_parameter('sample_rate', 2.0).value)
+        if not math.isfinite(rate) or not 0 < rate <= 15:
+            raise ValueError('sample_rate must be in (0, 15] Hz')
         self.request_id = None
         self.sent_at = None
         self.received_frames = 0
         self.requests = self.create_publisher(Request, "/api/videohub/request", 1)
         self.images = self.create_publisher(CompressedImage, "/camera/image/compressed", 2)
         self.create_subscription(Response, "/api/videohub/response", self.on_response, qos_profile_sensor_data)
-        self.create_timer(0.5, self.poll_camera)
-        self.get_logger().info("GetImageSample -> /camera/image/compressed (up to 2 Hz)")
+        self.create_timer(1.0 / rate, self.poll_camera)
+        self.get_logger().info(f"GetImageSample -> /camera/image/compressed (up to {rate:g} Hz; receipt stamps)")
 
     def poll_camera(self):
         now = time.monotonic()

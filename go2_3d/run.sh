@@ -5,6 +5,23 @@ mode="${1:-mapping}"
 profile="${2:-standard}"
 case "$mode" in mapping|localization|navigation) ;; *) echo 'Usage: run.sh mapping [standard|dense] [MAP_NAME] | run.sh [localization|navigation] [standard|dense] [X Y YAW_DEGREES [Z]]' >&2; exit 2 ;; esac
 case "$profile" in standard|dense) ;; *) echo 'Profile must be standard or dense' >&2; exit 2 ;; esac
+loop_backend="${GO2_LOOP_BACKEND:-lidar}"
+case "$loop_backend" in lidar|rtabmap) ;; *) echo 'GO2_LOOP_BACKEND must be lidar or rtabmap' >&2; exit 2 ;; esac
+image=go2-3d:edu
+backend_mounts=()
+backend_environment=()
+camera_calibration=''
+session_directory=''
+if [[ "$loop_backend" == rtabmap ]]; then
+  [[ "$mode" == mapping ]] || { echo 'RTAB-Map backend is mapping-only. Unset GO2_LOOP_BACKEND for localization/navigation of the optimized saved map.' >&2; exit 2; }
+  calibration_host="${GO2_CAMERA_CALIBRATION:-}"
+  [[ -n "$calibration_host" && -f "$calibration_host" ]] || { echo 'Set GO2_CAMERA_CALIBRATION to measured intrinsic, extrinsic and timing YAML; no guessed calibration is supplied.' >&2; exit 2; }
+  calibration_host="$(realpath -- "$calibration_host")"
+  [[ "$calibration_host" != *:* ]] || { echo 'Calibration path must not contain a colon' >&2; exit 2; }
+  image=go2-3d:rtabmap
+  camera_calibration=/calibration/camera.yaml
+  backend_mounts=(-v "$calibration_host:$camera_calibration:ro")
+fi
 auto_initialize=true
 initial_from_map_start=true
 map_name=default
@@ -36,7 +53,7 @@ if [[ "$mode" != mapping ]]; then
   done
 fi
 mkdir -p "$project_dir/maps" "$project_dir/runtime"
-sudo docker image inspect go2-3d:edu >/dev/null
+sudo docker image inspect "$image" >/dev/null
 if [[ "$mode" == navigation ]]; then
   sudo docker run --rm --network none --entrypoint /bin/bash \
     -v "$project_dir/maps:/maps:ro" -v "$project_dir:/opt/go2_project:ro" go2-3d:edu -c \
@@ -47,8 +64,22 @@ sudo docker run --rm --network none --entrypoint /bin/bash \
   -e OMP_NUM_THREADS=2 -e OPENBLAS_NUM_THREADS=1 \
   -v "$project_dir:/opt/go2_project:ro" -v "$project_dir/runtime:/runtime:rw" \
   -v "$project_dir/maps:/maps:ro" \
-  go2-3d:edu -c \
+  "$image" -c \
   'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && python3 /opt/go2_project/go2_3d/prepare.py --mode "$1"' bash "$mode"
+if [[ "$loop_backend" == rtabmap ]]; then
+  # Validate real calibration, generated TF names and the installed node API
+  # while the current live container is still running.
+  sudo docker run --rm --network none --entrypoint /bin/bash \
+    -e OMP_NUM_THREADS=2 -e OPENBLAS_NUM_THREADS=1 \
+    -v "$project_dir:/opt/go2_project:ro" -v "$project_dir/runtime:/runtime:ro" \
+    "${backend_mounts[@]}" "$image" -c \
+    'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && python3 /opt/go2_project/go2_3d/check_rtabmap.py --calibration "$1" --urdf /runtime/config/go2_edu.urdf' bash "$camera_calibration"
+  mkdir -p "$project_dir/maps/rtabmap_sessions"
+  session_host="$(mktemp -d "$project_dir/maps/rtabmap_sessions/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
+  session_directory="/maps/rtabmap_sessions/$(basename -- "$session_host")"
+  backend_environment=(-e "ROS_LOG_DIR=$session_directory/ros_logs")
+  echo "RTAB-Map session (new database, journal and logs): $session_host"
+fi
 # Our own run uses --rm; a stopped stale container can be removed safely only if
 # it was created by this launcher and has the matching label.
 if sudo docker container inspect go2-3d >/dev/null 2>&1; then
@@ -72,8 +103,9 @@ sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --
   -e OMP_NUM_THREADS=2 -e OPENBLAS_NUM_THREADS=1 \
   -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -e CYCLONEDDS_URI=file:///etc/cyclonedds.xml \
+  "${backend_environment[@]}" \
   -v "$dds_file:/etc/cyclonedds.xml:ro" \
   -v "$project_dir:/opt/go2_project:ro" \
   -v "$project_dir/runtime:/runtime:ro" -v "$project_dir/maps:/maps:rw" \
-  --entrypoint /bin/bash go2-3d:edu -c \
-  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7" map_name:="$8" initial_from_map_start:="$9"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z" "$map_name" "$initial_from_map_start"
+  "${backend_mounts[@]}" --entrypoint /bin/bash "$image" -c \
+  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7" map_name:="$8" initial_from_map_start:="$9" loop_backend:="${10}" camera_calibration:="${11}" session_directory:="${12}"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z" "$map_name" "$initial_from_map_start" "$loop_backend" "$camera_calibration" "$session_directory"

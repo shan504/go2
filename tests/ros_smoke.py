@@ -186,7 +186,7 @@ def phase(directory,mode,dense=False,auto=False):
             assert 0.1 < metadata['body_height_above_ground'] < 1.0
             selected = (Path(directory)/'latest').resolve()
             from std_srvs.srv import Trigger
-            with patch('mapper.build_bundle', side_effect=RuntimeError('alignment failed')):
+            with patch('map_export.build_bundle', side_effect=RuntimeError('alignment failed')):
                 failure = mapper.save_map(Trigger.Request(), Trigger.Response())
             assert not failure.success and (Path(directory)/'latest').resolve() == selected
             # Re-loading an already aligned save must not move its geometry.

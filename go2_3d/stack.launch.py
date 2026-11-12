@@ -20,6 +20,18 @@ def generate_launch_description():
     params = str(config/'nav2_3d.yaml')
     whitelist = '["^/(tf|tf_static|odom|point_cloud2|registered_cloud|map_cloud|map|map_metadata|scan|robot_description|initialpose|goal_pose|plan|local_plan|cmd_vel.*)$","^/camera/image/compressed$","^/(localization|operator|mapping|control|navigation)/.*$","^/(local_costmap|global_costmap)/.*$"]'
 
+    def validate_backend(context):
+        if LaunchConfiguration('loop_backend').perform(context) == 'rtabmap':
+            if mode.perform(context) != 'mapping':
+                raise RuntimeError('The optional RTAB-Map backend is mapping-only; '
+                                   'localization/navigation continue using the saved optimized map')
+            if LaunchConfiguration('camera').perform(context).lower() != 'true':
+                raise RuntimeError('RTAB-Map visual loop closure requires camera input')
+            calibration = Path(LaunchConfiguration('camera_calibration').perform(context))
+            if not calibration.is_file():
+                raise RuntimeError('RTAB-Map requires a measured camera calibration file')
+        return []
+
     def mapper_node(context):
         parameters = [str(root/'go2_3d/gicp.yaml'), LaunchConfiguration('gicp_params'),
                       {'mode': mapper_mode,
@@ -34,13 +46,24 @@ def generate_launch_description():
             # Registration downsampling controls CPU cost separately from the
             # complete saved PCD and from the original 1s freshness deadline.
             parameters.append({'scan_window': 0.5})
+        remappings = []
+        if LaunchConfiguration('loop_backend').perform(context) == 'rtabmap':
+            parameters.append({'mapping_backend': 'rtabmap', 'map_frame': 'gicp_odom',
+                               'loop_closure_enabled': False})
+            remappings = [('/map_cloud', '/gicp/map_cloud'),
+                          ('/registered_cloud', '/gicp/registered_cloud'),
+                          ('/save_3d_map', '/gicp/save_unoptimized_map')]
         return [Node(executable='/usr/bin/python3', name='go2_gicp', output='screen',
-                     arguments=[str(root/'go2_3d/mapper.py')], parameters=parameters)]
+                     arguments=[str(root/'go2_3d/mapper.py')], parameters=parameters,
+                     remappings=remappings)]
 
     return LaunchDescription([
         DeclareLaunchArgument('mode',default_value='mapping',choices=['mapping','localization','navigation']),
         DeclareLaunchArgument('map_name',default_value='default'),
         DeclareLaunchArgument('camera',default_value='true'),
+        DeclareLaunchArgument('loop_backend',default_value='lidar',choices=['lidar','rtabmap']),
+        DeclareLaunchArgument('camera_calibration',default_value=''),
+        DeclareLaunchArgument('session_directory',default_value=''),
         DeclareLaunchArgument('gicp_params',default_value=str(root/'go2_3d/gicp.yaml')),
         DeclareLaunchArgument('port',default_value='8765'),
         DeclareLaunchArgument('auto_initialize',default_value='true'),
@@ -55,15 +78,29 @@ def generate_launch_description():
         # Legacy byte-budget bridges can hold two frames plus overhead.
         # SDK/Rust bridges use a message-count queue instead (see capacity doc).
         DeclareLaunchArgument('send_buffer_limit',default_value='268435456'),
+        OpaqueFunction(function=validate_backend),
         Node(executable='/usr/bin/python3',name='go2_edu_dds_bridge',output='screen',
              arguments=[str(root/'go2_3d/control_bridge.py')],parameters=[{'enable_control':False,
                  'allow_motion':ParameterValue(PythonExpression(["'",mode,"' == 'navigation'"]),value_type=bool)}]),
         Node(executable='/usr/bin/python3',name='go2_camera_sample',output='screen',
              condition=IfCondition(LaunchConfiguration('camera')),
-             arguments=[str(root/'patches/sensors/go2_camera_sample.py')]),
+             arguments=[str(root/'patches/sensors/go2_camera_sample.py')],
+             parameters=[{'sample_rate': ParameterValue(PythonExpression([
+                 "8.0 if '", LaunchConfiguration('loop_backend'), "' == 'rtabmap' else 2.0"]),
+                 value_type=float)}]),
         Node(package='robot_state_publisher',executable='robot_state_publisher',output='screen',
              parameters=[{'robot_description':(config/'go2_edu.urdf').read_text(),'use_sim_time':False}]),
         OpaqueFunction(function=mapper_node),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(root/'go2_3d/rtabmap_backend.launch.py')),
+            condition=IfCondition(PythonExpression([
+                "'", LaunchConfiguration('loop_backend'), "' == 'rtabmap'"])),
+            launch_arguments={
+                'camera_calibration': LaunchConfiguration('camera_calibration'),
+                'session_directory': LaunchConfiguration('session_directory'),
+                'map_name': LaunchConfiguration('map_name'),
+                'gicp_params': LaunchConfiguration('gicp_params'),
+            }.items()),
         Node(executable='/usr/bin/python3',name='go2_operator',output='screen',
              arguments=[str(root/'go2_3d/operator_bridge.py')],parameters=[{'mode':mode}]),
         Node(package='pointcloud_to_laserscan',executable='pointcloud_to_laserscan_node',output='screen',

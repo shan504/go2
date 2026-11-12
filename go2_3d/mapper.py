@@ -6,7 +6,8 @@ import json
 from dataclasses import fields
 from collections import deque
 from pathlib import Path
-from map_library import map_name, new_directory, publish
+from map_library import map_name
+from map_export import save_snapshot
 import numpy as np
 import open3d as o3d
 import yaml
@@ -19,15 +20,14 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profi
 from std_msgs.msg import Bool, String, Header, Empty
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import PointCloud2
+from nav_msgs.msg import Odometry
 from geometry_msgs.msg import TransformStamped, PoseWithCovarianceStamped
 from tf2_ros import Buffer, TransformListener, TransformBroadcaster, TransformException
 from geometry import (pose_matrix, quaternion_from_matrix, transform_points,
                       cloud_xyz, filter_points, rotation_angle, ObservedGrid, planar_pose, first_map_pose)
 from registration import cloud, align, static_correction_is_consistent, blend_correction, odometry_is_stationary
 from ros_cloud import xyz_message
-from ground import estimate_ground,body_seed_position
-from denoise import clean_directory
-from navigation_grid import build_bundle
+from ground import body_seed_position
 from map_start import start_pose_from_metadata
 from localization_hold import OdometryBudget
 from mapping_store import MappingStore
@@ -76,7 +76,7 @@ class Mapper(Node):
                         localization_hold_rotation_degrees=60.0, localization_odom_timeout=0.3,
                         correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
                         initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
-        defaults['loop_closure_enabled'] = True
+        defaults.update(loop_closure_enabled=True, mapping_backend='lidar', map_frame='map')
         defaults.update(auto_relocalization=True, recovery_period=1.0, recovery_reference_timeout=60.0)
         recovery_defaults = RecoveryConfig()
         defaults.update({'recovery_'+field.name: getattr(recovery_defaults, field.name)
@@ -87,6 +87,14 @@ class Mapper(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self.p = {k: self.get_parameter(k).value for k in defaults}
+        self.external_backend = self.p['mapping_backend'] == 'rtabmap'
+        if self.p['mapping_backend'] not in ('lidar', 'rtabmap'):
+            raise ValueError('mapping_backend must be lidar or rtabmap')
+        if self.external_backend and (self.p['mode'] != 'mapping' or
+                self.p['loop_closure_enabled'] or self.p['map_frame'] != 'gicp_odom'):
+            raise ValueError('RTAB-Map requires mapping mode, gicp_odom frame and old loop closure disabled')
+        if not self.external_backend and self.p['map_frame'] != 'map':
+            raise ValueError('The original mapping/localization path uses map frame')
         loop_config = LoopConfig(**{field.name: self.p['loop_'+field.name]
                                     for field in fields(loop_defaults)})
         self.recovery_config = RecoveryConfig(**{field.name: self.p['recovery_'+field.name]
@@ -176,10 +184,19 @@ class Mapper(Node):
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.map_pub = self.create_publisher(PointCloud2, '/map_cloud', retained)
         self.registered_pub = self.create_publisher(PointCloud2, '/registered_cloud', qos_profile_sensor_data)
+        if self.external_backend:
+            # These are accepted GICP poses, never the native /odom estimate.
+            self.frontend_odom_pub = self.create_publisher(Odometry, '/gicp/odom', 100)
+            self.frontend_cloud_pub = self.create_publisher(PointCloud2, '/gicp/scan_cloud', 100)
+            self.keyframe_odom_pub = self.create_publisher(Odometry, '/gicp/keyframe/odom', 100)
+            self.keyframe_cloud_pub = self.create_publisher(PointCloud2, '/gicp/keyframe/cloud', 100)
         self.valid_pub = self.create_publisher(Bool, '/localization/valid', 1)
         self.status_pub = self.create_publisher(String, '/localization/status', 1)
         self.state_pub = self.create_publisher(String, '/localization/state', 1)
         self.loop_pub = self.create_publisher(String, '/mapping/loop_closure', retained)
+        self.backend_ready = False
+        if self.external_backend:
+            self.create_subscription(Bool, '/mapping/backend_ready', self.backend_readiness, retained)
         self.recovery_pub = self.create_publisher(String, '/localization/recovery', retained)
         self.recovery_worker = (RecoveryWorker(Relocalizer(self.localization_points, self.recovery_config),
                                                self.recovery_completed)
@@ -524,9 +541,22 @@ class Mapper(Node):
         self.report(text)
         return self.initialized
 
+    def backend_readiness(self, message):
+        with self.lock:
+            self.backend_ready = bool(message.data)
+
     def process(self):
         started = time.monotonic()
         with self.lock:
+            if self.external_backend and (not self.backend_ready or not all(
+                    publisher.get_subscription_count() for publisher in (
+                        self.frontend_odom_pub, self.frontend_cloud_pub,
+                        self.keyframe_odom_pub, self.keyframe_cloud_pub))):
+                # Discovery order is not guaranteed by launch order. Do not
+                # commit the first map observation before its journal owner
+                # can receive both halves and retain the actual start pose.
+                self.get_logger().info('Waiting for RTAB-Map keyframe journal readiness', throttle_duration_sec=5.)
+                return
             if self.latest is None or not self.initialized or time.monotonic()-self.latest[2] > 1.0:
                 return
             if (self.p['mode'] == 'localization' and self.recovery_episode and
@@ -673,8 +703,16 @@ class Mapper(Node):
             mapped_points = transform_points(input_points,matched)
             registered = cloud(mapped_points,self.p['map_voxel_size'])
             new = np.asarray(registered.points)
-            header = Header(stamp=message.header.stamp,frame_id='map')
+            header = Header(stamp=message.header.stamp,frame_id=self.p['map_frame'])
             registered_message = xyz_message(header,new)
+            # Prepare optional exports before committing the accepted scan.
+            if self.external_backend:
+                frontend_cloud = xyz_message(Header(stamp=message.header.stamp, frame_id='base_link'), input_points)
+                frontend_odom = Odometry(header=Header(stamp=message.header.stamp, frame_id='gicp_odom'),
+                                         child_frame_id='base_link')
+                t, q = matched[:3,3], quaternion_from_matrix(matched)
+                frontend_odom.pose.pose.position.x, frontend_odom.pose.pose.position.y, frontend_odom.pose.pose.position.z = map(float, t)
+                frontend_odom.pose.pose.orientation.x, frontend_odom.pose.pose.orientation.y, frontend_odom.pose.pose.orientation.z, frontend_odom.pose.pose.orientation.w = map(float, q)
             now = time.monotonic()
             update, free_additions = None, None
             observation = None
@@ -718,6 +756,20 @@ class Mapper(Node):
                 self.odom_budget.observe(odom_base, Time.from_msg(message.header.stamp).nanoseconds)
                 self.hold_exhausted = ''
                 self.registered_pub.publish(registered_message)
+                if self.external_backend:
+                    # Publish TF at this measurement's stamp. Stamping an old
+                    # correction with latest native odometry would let RTAB
+                    # silently substitute a different pose via its TF lookup.
+                    transform = TransformStamped(header=Header(stamp=message.header.stamp, frame_id='gicp_odom'), child_frame_id='odom')
+                    t, q = output_correction[:3,3], quaternion_from_matrix(output_correction)
+                    transform.transform.translation.x, transform.transform.translation.y, transform.transform.translation.z = map(float, t)
+                    transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z, transform.transform.rotation.w = map(float, q)
+                    self.broadcaster.sendTransform(transform)
+                    self.frontend_odom_pub.publish(frontend_odom)
+                    self.frontend_cloud_pub.publish(frontend_cloud)
+                    if update is not None:
+                        self.keyframe_odom_pub.publish(frontend_odom)
+                        self.keyframe_cloud_pub.publish(frontend_cloud)
                 count = self.map_point_count
                 threshold = self.p['max_map_points']
                 warn_capacity = (self.mapping_store is not None and not self.capacity_warned and
@@ -844,6 +896,9 @@ class Mapper(Node):
         return super().destroy_node()
 
     def publish_correction(self):
+        if self.external_backend:
+            # Accepted-scan callback owns gicp_odom->odom in this mode.
+            return
         with self.lock:
             if self.p['mode'] == 'localization':
                 valid, _, _ = self.localization_readiness()
@@ -882,17 +937,22 @@ class Mapper(Node):
             self.last_tf_stamp = stamp.nanoseconds
 
     def publish_map(self):
+        if self.external_backend and not self.map_pub.get_subscription_count():
+            return
         with self.lock:
             points = self.points
             generation = self.generation
         if len(points):
-            header = Header(stamp=self.get_clock().now().to_msg(),frame_id='map')
+            header = Header(stamp=self.get_clock().now().to_msg(),frame_id=self.p['map_frame'])
             message = xyz_message(header,points)
             with self.lock:
                 if generation == self.generation:
                     self.map_pub.publish(message)
 
     def save_map(self, request, response):
+        if self.external_backend:
+            response.success, response.message = False, 'Use /save_3d_map from RTAB-Map backend; unoptimized frontend export is disabled'
+            return response
         if self.p['mode'] != 'mapping':
             response.success, response.message = False, 'Save is available only in mapping mode'
             return response
@@ -910,34 +970,13 @@ class Mapper(Node):
         if len(points) < 100:
             response.success, response.message = False, 'No usable 3D map yet'
             return response
-        root = Path(self.p['output_directory'])
-        directory = new_directory(root,map_name(self.p['map_name']))
         try:
-            directory.mkdir(parents=True,exist_ok=False)
-            # MappingStore already retained every voxel at the configured
-            # resolution. Export its exact full snapshot without re-thinning.
-            if not o3d.io.write_point_cloud(str(directory/'map.pcd'),cloud(points,None),compressed=True):
-                raise RuntimeError('PCD write failed')
-            grid = ObservedGrid(self.p['grid_resolution'])
-            grid.free = free
-            ground = estimate_ground(points,self.p['floor_z'])
-            grid.export(points,directory,self.p['floor_z'],self.p['obstacle_min_height'],self.p['obstacle_max_height'],ground)
-            denoise_report = clean_directory(directory)
-            (directory/'metadata.yaml').write_text(yaml.safe_dump(dict(frame_id='map',parameters=self.p,
-                map_start_pose=start_pose.tolist(),
-                ground_model=ground,navigation_denoise=denoise_report,
-                loop_closure=loop_report,
-                map_type='GICP scan-to-map with SE3 pose-graph loop closure enabled'
-                    if self.loop_worker is not None else 'incremental GICP scan-to-map; loop closure disabled',
-                point_count=len(points))))
-            # Raw observations remain as a retained version. Publish only
-            # the complete shared-coordinate bundle used by every map load.
-            aligned = new_directory(root,map_name(self.p['map_name']),'leveled-')
-            build_bundle(root,directory,aligned)
-            publish(root,aligned)
+            aligned = save_snapshot(points, free, start_pose, self.p, loop_report,
+                'GICP scan-to-map with SE3 pose-graph loop closure enabled'
+                if self.loop_worker is not None else 'incremental GICP scan-to-map; loop closure disabled')
             response.success, response.message = True, str(aligned)
         except Exception as error:
-            response.success, response.message = False, f'{error}; partial files, if any: {directory}'
+            response.success, response.message = False, str(error)
         return response
 
 
