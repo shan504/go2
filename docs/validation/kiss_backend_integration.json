@@ -1,0 +1,76 @@
+{
+  "validation_date": "2026-11-12",
+  "stable_base": "5b98e7b8bc19d17fd8cab9f72a0cf459b73da5cc",
+  "upstream_commit": "db81ee31b59bc7a18af3fec8641d5867646ab57a",
+  "real_farm_bag_available": false,
+  "real_robot_motion_run": false,
+  "jetson_arm64_build_verified": false,
+  "full_optional_dockerfile_build_verified": false,
+  "unit_tests": {
+    "passed": 201,
+    "log_sha256": "b88ce4ccad95ee1d77d204a1c1c39f034c84c1c68210f8b2b5110d15d12bbb1d",
+    "command": "OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1 .venv-kiss/bin/python -m unittest discover -s tests -p 'test_*.py'"
+  },
+  "ros_backend_integration": {
+    "passed": true,
+    "log_sha256": "5b9e1ce76721ffa28a9bb506f70dcccb0af4f734ec9459a0500188e9b06c5eac",
+    "frontend_open3d": "0.14.1",
+    "backend_open3d": "0.19.0",
+    "loop_constraints": 1,
+    "optimized_map_points": 319351,
+    "named_maps": [
+      "kiss-alpha",
+      "kiss-beta"
+    ],
+    "test_input": "synthetic observations, test-only bounded localization crop; not field throughput"
+  },
+  "raw_bag_replay": {
+    "lidar": {
+      "passed": true,
+      "script_exit_code": 0,
+      "input": "80 synthetic stationary room cloud+odom pairs; no loop",
+      "frontend_runtime": {
+        "backend": "lidar",
+        "rate": 0.5,
+        "frontend_open3d": "0.14.1",
+        "replay_topics": [
+          "/point_cloud2",
+          "/odom"
+        ],
+        "network": "none",
+        "motion_nodes": false,
+        "provenance": "unknown",
+        "source": "/bag"
+      },
+      "saved_points": 4053,
+      "applied_loops": 0,
+      "checked_observations": 15,
+      "final_cleanup_verified": true,
+      "mapping_log_sha256": "9b780ca4fe74cfcb029a11d5edad7d30848761bfaf992c330445c7fb6f1b7897"
+    },
+    "kiss": {
+      "passed": true,
+      "script_exit_code": 0,
+      "input": "80 synthetic stationary room cloud+odom pairs; no loop",
+      "frontend_runtime": {
+        "backend": "kiss",
+        "rate": 0.5,
+        "frontend_open3d": "0.14.1",
+        "replay_topics": [
+          "/point_cloud2",
+          "/odom"
+        ],
+        "network": "none",
+        "motion_nodes": false,
+        "provenance": "unknown",
+        "source": "/bag"
+      },
+      "saved_points": 4053,
+      "applied_loops": 0,
+      "checked_observations": 15,
+      "final_cleanup_verified": true,
+      "mapping_log_sha256": "95544a9b4ea760753b9ba350502d6116f842f0b065fac23c7c5bab9940221a93"
+    }
+  },
+  "raw_bag_replay_limitations": "Outer network-none wrapper reached successful save. Final inner script verified in existing task-only disconnected container after Docker VFS copies exhausted disk; task temporary image was removed. This is not a real farm A/B."
+}

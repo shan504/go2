@@ -3,3 +3,5 @@
 maps
 runtime
 __pycache__
+.venv*
+.kiss-deps

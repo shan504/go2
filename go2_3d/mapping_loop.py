@@ -27,6 +27,8 @@ class MappingLoopWorker:
         self.error = ''
         self.last_result = {}
         self.backend_status = {}
+        self.flush_requested = 0
+        self.flush_completed = 0
         self.event = threading.Event()
         self.stopping = threading.Event()
         self.thread = threading.Thread(target=self._run, name='mapping-loop', daemon=True)
@@ -41,6 +43,7 @@ class MappingLoopWorker:
         with self.lock:
             return dict(state=self.state, applied_loops=self.applied_loops,
                         observations=len(self.observations), checked_observations=self.checked,
+                        flush_requested=self.flush_requested, flush_completed=self.flush_completed,
                         retained_scan_bytes=sum(o.points_body.nbytes for o in self.observations),
                         error=self.error, backend=dict(self.backend_status),
                         last_loop=dict(self.last_result))
@@ -48,7 +51,25 @@ class MappingLoopWorker:
     def ready_for_save(self):
         # Check and snapshot the map within the same caller-held lock.
         return (self.checked == len(self.observations) and
+                self.flush_completed >= self.flush_requested and
                 self.state in ('idle', 'applied', 'waiting') and not self.error)
+
+    def request_flush(self):
+        """Seal a backend's final partial submap on its owner thread.
+
+        Repeated save calls with no new observations are idempotent. The
+        original backend has no flush hook and retains its previous behavior.
+        Caller holds the mapper lock, as for ready_for_save().
+        """
+        if callable(getattr(self.backend, 'flush', None)):
+            count = len(self.observations)
+            if count > self.flush_requested:
+                self.flush_requested = count
+                self.event.set()
+            elif self.state == 'error' and self.flush_completed < self.flush_requested:
+                # A failed seal/rebuild can be retried after storage/dependency
+                # recovery even while the robot remains stationary.
+                self.event.set()
 
     def _run(self):
         while not self.stopping.is_set():
@@ -59,20 +80,26 @@ class MappingLoopWorker:
             try:
                 with self.lock:
                     snapshot = tuple(self.observations)
+                    flush_to = self.flush_requested
                     self.state, self.error = 'checking', ''
                 for observation in snapshot[self.backend.observation_count:]:
                     if self.stopping.is_set():
                         return
                     self.backend.append(observation.points_body, observation.pose)
+                if flush_to > self.flush_completed:
+                    self.backend.flush()
                 result = self.backend.detect_and_optimize()
                 with self.lock:
                     self.backend_status = dict(self.backend.status)
                 if result is None:
                     with self.lock:
                         self.checked = len(snapshot)
+                        self.flush_completed = max(self.flush_completed, flush_to)
                         self.state = 'idle'
                     continue
                 self._rebuild_and_commit(snapshot, result)
+                with self.lock:
+                    self.flush_completed = max(self.flush_completed, flush_to)
             except Exception as error:
                 # Never disable live mapping or publish a partial correction.
                 # A new observation can retry the backend; save reports failure.
@@ -125,4 +152,7 @@ class MappingLoopWorker:
     def close(self):
         self.stopping.set()
         self.event.set()
+        close = getattr(self.backend, 'close', None)
+        if close is not None:
+            close()
         self.thread.join()

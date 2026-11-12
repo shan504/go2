@@ -21,6 +21,12 @@ def generate_launch_description():
     whitelist = '["^/(tf|tf_static|odom|point_cloud2|registered_cloud|map_cloud|map|map_metadata|scan|robot_description|initialpose|goal_pose|plan|local_plan|cmd_vel.*)$","^/camera/image/compressed$","^/(localization|operator|mapping|control|navigation)/.*$","^/(local_costmap|global_costmap)/.*$"]'
 
     def validate_backend(context):
+        if LaunchConfiguration('loop_backend').perform(context) == 'kiss':
+            if mode.perform(context) != 'mapping':
+                raise RuntimeError('KISS backend is mapping-only; navigation uses the saved map with GICP')
+            python = Path(LaunchConfiguration('kiss_python').perform(context))
+            if not python.is_file():
+                raise RuntimeError('KISS requires a separate kiss_python interpreter')
         if LaunchConfiguration('loop_backend').perform(context) == 'rtabmap':
             if mode.perform(context) != 'mapping':
                 raise RuntimeError('The optional RTAB-Map backend is mapping-only; '
@@ -47,13 +53,19 @@ def generate_launch_description():
             # complete saved PCD and from the original 1s freshness deadline.
             parameters.append({'scan_window': 0.5})
         remappings = []
+        if LaunchConfiguration('loop_backend').perform(context) == 'kiss':
+            parameters.append({'mapping_backend': 'kiss', 'map_frame': 'map',
+                               'loop_closure_enabled': True,
+                               'kiss_python': LaunchConfiguration('kiss_python'),
+                               'mapping_journal_directory': LaunchConfiguration('session_directory'),
+                               'mapping_journal_provenance': 'robot_recording'})
         if LaunchConfiguration('loop_backend').perform(context) == 'rtabmap':
             parameters.append({'mapping_backend': 'rtabmap', 'map_frame': 'gicp_odom',
                                'loop_closure_enabled': False})
             remappings = [('/map_cloud', '/gicp/map_cloud'),
                           ('/registered_cloud', '/gicp/registered_cloud'),
                           ('/save_3d_map', '/gicp/save_unoptimized_map')]
-        return [Node(executable='/usr/bin/python3', name='go2_gicp', output='screen',
+        return [Node(executable=LaunchConfiguration('mapper_python'), name='go2_gicp', output='screen',
                      arguments=[str(root/'go2_3d/mapper.py')], parameters=parameters,
                      remappings=remappings)]
 
@@ -61,7 +73,9 @@ def generate_launch_description():
         DeclareLaunchArgument('mode',default_value='mapping',choices=['mapping','localization','navigation']),
         DeclareLaunchArgument('map_name',default_value='default'),
         DeclareLaunchArgument('camera',default_value='true'),
-        DeclareLaunchArgument('loop_backend',default_value='lidar',choices=['lidar','rtabmap']),
+        DeclareLaunchArgument('loop_backend',default_value='lidar',choices=['lidar','rtabmap','kiss']),
+        DeclareLaunchArgument('mapper_python',default_value='/usr/bin/python3'),
+        DeclareLaunchArgument('kiss_python',default_value='/opt/kiss-venv/bin/python3'),
         DeclareLaunchArgument('camera_calibration',default_value=''),
         DeclareLaunchArgument('session_directory',default_value=''),
         DeclareLaunchArgument('gicp_params',default_value=str(root/'go2_3d/gicp.yaml')),

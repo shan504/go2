@@ -1,0 +1,29 @@
+# Upstream KISS-SLAM is built separately from the fixed IROS25 commit.
+# Compile with: uv pip compile --python-version 3.10 --universal --generate-hashes requirements-kiss.in -o requirements-kiss.lock
+# Keep NumPy 1.x: MapClosures 2.0.2 explicitly requires numpy<2.
+numpy==1.26.4
+map_closures==2.0.2
+kiss-icp==1.2.3
+open3d==0.19.0
+PyYAML==6.0.2
+pydantic==2.11.7
+pydantic-settings==2.10.1
+tqdm==4.67.1
+rosbags==0.11.0
+# Existing camera regression tests only; the KISS backend does not require a camera.
+opencv-python-headless==4.11.0.86
+# Pin Python 3.10-compatible numerical/UI dependencies used by Open3D.
+matplotlib==3.10.3
+pandas==2.2.3
+scipy==1.15.3
+scikit-learn==1.7.0
+ipython==8.37.0
+# Open3D wheel metadata differs across Python ABIs; include these explicitly.
+ipywidgets==8.1.9
+nbformat==5.11.1
+# Build inside the dedicated venv, never change system CMake or Python packages.
+pip==25.0.1
+scikit-build-core==0.11.6
+pybind11==3.0.0
+cmake==3.31.6
+ninja==1.11.1.4

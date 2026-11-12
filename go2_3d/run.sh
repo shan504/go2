@@ -6,12 +6,18 @@ profile="${2:-standard}"
 case "$mode" in mapping|localization|navigation) ;; *) echo 'Usage: run.sh mapping [standard|dense] [MAP_NAME] | run.sh [localization|navigation] [standard|dense] [X Y YAW_DEGREES [Z]]' >&2; exit 2 ;; esac
 case "$profile" in standard|dense) ;; *) echo 'Profile must be standard or dense' >&2; exit 2 ;; esac
 loop_backend="${GO2_LOOP_BACKEND:-lidar}"
-case "$loop_backend" in lidar|rtabmap) ;; *) echo 'GO2_LOOP_BACKEND must be lidar or rtabmap' >&2; exit 2 ;; esac
+case "$loop_backend" in lidar|rtabmap|kiss) ;; *) echo 'GO2_LOOP_BACKEND must be lidar, rtabmap or kiss' >&2; exit 2 ;; esac
 image=go2-3d:edu
+mapper_python=/usr/bin/python3
+kiss_python=/opt/kiss-venv/bin/python3
 backend_mounts=()
 backend_environment=()
 camera_calibration=''
 session_directory=''
+if [[ "$loop_backend" == kiss ]]; then
+  [[ "$mode" == mapping ]] || { echo 'KISS backend is mapping-only; use the saved optimized map with the existing localization/navigation mode.' >&2; exit 2; }
+  image=go2-3d:kiss-backend
+fi
 if [[ "$loop_backend" == rtabmap ]]; then
   [[ "$mode" == mapping ]] || { echo 'RTAB-Map backend is mapping-only. Unset GO2_LOOP_BACKEND for localization/navigation of the optimized saved map.' >&2; exit 2; }
   calibration_host="${GO2_CAMERA_CALIBRATION:-}"
@@ -80,6 +86,16 @@ if [[ "$loop_backend" == rtabmap ]]; then
   backend_environment=(-e "ROS_LOG_DIR=$session_directory/ros_logs")
   echo "RTAB-Map session (new database, journal and logs): $session_host"
 fi
+if [[ "$loop_backend" == kiss ]]; then
+  sudo docker run --rm --network none --entrypoint "$kiss_python" \
+    -v "$project_dir:/opt/go2_project:ro" "$image" \
+    /opt/go2_project/go2_3d/check_kiss_env.py
+  mkdir -p "$project_dir/maps/kiss_sessions"
+  session_host="$(mktemp -d "$project_dir/maps/kiss_sessions/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
+  session_directory="/maps/kiss_sessions/$(basename -- "$session_host")/journal"
+  backend_environment=(-e "ROS_LOG_DIR=/maps/kiss_sessions/$(basename -- "$session_host")/ros_logs")
+  echo "KISS-SLAM session (new keyframe journal): $session_host"
+fi
 # Our own run uses --rm; a stopped stale container can be removed safely only if
 # it was created by this launcher and has the matching label.
 if sudo docker container inspect go2-3d >/dev/null 2>&1; then
@@ -108,4 +124,4 @@ sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --
   -v "$project_dir:/opt/go2_project:ro" \
   -v "$project_dir/runtime:/runtime:ro" -v "$project_dir/maps:/maps:rw" \
   "${backend_mounts[@]}" --entrypoint /bin/bash "$image" -c \
-  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7" map_name:="$8" initial_from_map_start:="$9" loop_backend:="${10}" camera_calibration:="${11}" session_directory:="${12}"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z" "$map_name" "$initial_from_map_start" "$loop_backend" "$camera_calibration" "$session_directory"
+  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7" map_name:="$8" initial_from_map_start:="$9" loop_backend:="${10}" camera_calibration:="${11}" session_directory:="${12}" mapper_python:="${13}" kiss_python:="${14}"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z" "$map_name" "$initial_from_map_start" "$loop_backend" "$camera_calibration" "$session_directory" "$mapper_python" "$kiss_python"

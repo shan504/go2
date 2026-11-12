@@ -34,6 +34,8 @@ from mapping_store import MappingStore
 from loop_closure import LoopConfig
 from mapping_loop import MappingLoopWorker
 from mapping_rebuild import MappingObservation
+from mapping_journal import MappingJournal
+from kiss_backend import KissConfig
 from relocalization import Relocalizer, RecoveryConfig
 from localization_recovery import RecoveryWorker, RecoveryJob
 
@@ -76,7 +78,12 @@ class Mapper(Node):
                         localization_hold_rotation_degrees=60.0, localization_odom_timeout=0.3,
                         correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
                         initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
-        defaults.update(loop_closure_enabled=True, mapping_backend='lidar', map_frame='map')
+        defaults.update(loop_closure_enabled=True, mapping_backend='lidar', map_frame='map',
+                        mapping_journal_directory='', mapping_journal_provenance='unknown',
+                        kiss_python='/opt/kiss-venv/bin/python3', kiss_process_timeout=60.0)
+        kiss_defaults = KissConfig()
+        defaults.update({'kiss_'+field.name: getattr(kiss_defaults, field.name)
+                         for field in fields(kiss_defaults)})
         defaults.update(auto_relocalization=True, recovery_period=1.0, recovery_reference_timeout=60.0)
         recovery_defaults = RecoveryConfig()
         defaults.update({'recovery_'+field.name: getattr(recovery_defaults, field.name)
@@ -88,8 +95,11 @@ class Mapper(Node):
             self.declare_parameter(name, value)
         self.p = {k: self.get_parameter(k).value for k in defaults}
         self.external_backend = self.p['mapping_backend'] == 'rtabmap'
-        if self.p['mapping_backend'] not in ('lidar', 'rtabmap'):
-            raise ValueError('mapping_backend must be lidar or rtabmap')
+        if self.p['mapping_backend'] not in ('lidar', 'rtabmap', 'kiss'):
+            raise ValueError('mapping_backend must be lidar, rtabmap or kiss')
+        if self.p['mapping_backend'] == 'kiss' and (
+                self.p['mode'] != 'mapping' or not self.p['loop_closure_enabled']):
+            raise ValueError('KISS backend requires mapping mode with loop_closure_enabled=true')
         if self.external_backend and (self.p['mode'] != 'mapping' or
                 self.p['loop_closure_enabled'] or self.p['map_frame'] != 'gicp_odom'):
             raise ValueError('RTAB-Map requires mapping mode, gicp_odom frame and old loop closure disabled')
@@ -116,6 +126,17 @@ class Mapper(Node):
                 raise ValueError(f'{name} must be finite and positive')
         map_name(self.p['map_name'])
         self.lock = threading.RLock()
+        self.journal = None
+        self.journal_map_from_frontend = np.eye(4)
+        if self.p['mapping_journal_directory']:
+            if self.p['mode'] != 'mapping' or self.external_backend:
+                raise ValueError('Mapping journal is for lidar/kiss mapping only; RTAB-Map has its own journal')
+            self.journal = MappingJournal(self.p['mapping_journal_directory'], {
+                'recorded_backend': self.p['mapping_backend'],
+                'provenance': self.p['mapping_journal_provenance'],
+                'parameters': self.p,
+                'frontend_feedback': bool(self.p['loop_closure_enabled']),
+            })
         self.generation = 0
         self.latest = None
         self.history = deque(maxlen=32)
@@ -201,9 +222,15 @@ class Mapper(Node):
         self.recovery_worker = (RecoveryWorker(Relocalizer(self.localization_points, self.recovery_config),
                                                self.recovery_completed)
                                 if self.p['mode'] == 'localization' and self.p['auto_relocalization'] else None)
+        backend = None
+        if self.p['mapping_backend'] == 'kiss':
+            from kiss_backend_process import KissBackendProcess
+            backend = KissBackendProcess(KissConfig(**{
+                field.name: self.p['kiss_'+field.name] for field in fields(kiss_defaults)}),
+                python=self.p['kiss_python'], timeout=self.p['kiss_process_timeout'])
         self.loop_worker = (MappingLoopWorker(
             self.lock, loop_config, self.p['map_voxel_size'], self.p['voxel_size'],
-            self.p['grid_resolution'], self.prepare_loop_correction)
+            self.p['grid_resolution'], self.prepare_loop_correction, backend=backend)
             if self.p['mode'] == 'mapping' and self.p['loop_closure_enabled'] else None)
         self.last_loop_report = None
         self.loop_applied_reported = 0
@@ -733,6 +760,12 @@ class Mapper(Node):
                 if generation != self.generation:
                     return
                 if update is not None:
+                    if self.journal is not None:
+                        # A journal write failure must not leave an accepted scan
+                        # missing from an apparently complete recording. Save the
+                        # body geometry and remove only prior backend frame jumps.
+                        self.journal.append(stamp_ns, input_points, matched,
+                                            self.journal_map_from_frontend)
                     self.mapping_store.commit(update)
                     self.grid.free.update(free_additions)
                     self.last_keyframe = matched.copy()
@@ -879,10 +912,12 @@ class Mapper(Node):
         accepted = (delta @ self.accepted_match_correction
                     if self.accepted_match_correction is not None else None)
         last, start, generation = poses[-1], poses[0], self.generation+1
+        journal_correction = delta @ self.journal_map_from_frontend
         def publish():
             self.mapping_store, self.grid = store, grid
             self.correction, self.accepted_match_correction = correction, accepted
             self.last_keyframe, self.mapping_start_pose = last, start
+            self.journal_map_from_frontend = journal_correction
             # Reject registration prepared against the previous map revision.
             # Raw odometry, timestamps and freshness budgets stay intact.
             self.generation = generation
@@ -957,6 +992,11 @@ class Mapper(Node):
             response.success, response.message = False, 'Save is available only in mapping mode'
             return response
         with self.lock:
+            if self.loop_worker is not None:
+                # KISS must also test the final partial submap when saving at
+                # the revisited start. The request is handled by its worker;
+                # no graph mutation occurs on this ROS service thread.
+                self.loop_worker.request_flush()
             if self.loop_worker is not None and not self.loop_worker.ready_for_save():
                 response.success, response.message = False, (
                     'Loop closure check/rebuild pending or failed; stop at the revisited area, '
@@ -972,7 +1012,9 @@ class Mapper(Node):
             return response
         try:
             aligned = save_snapshot(points, free, start_pose, self.p, loop_report,
-                'GICP scan-to-map with SE3 pose-graph loop closure enabled'
+                ('GICP scan-to-map with official KISS-SLAM/MapClosures/g2o backend'
+                 if self.p['mapping_backend'] == 'kiss' else
+                 'GICP scan-to-map with SE3 pose-graph loop closure enabled')
                 if self.loop_worker is not None else 'incremental GICP scan-to-map; loop closure disabled')
             response.success, response.message = True, str(aligned)
         except Exception as error:

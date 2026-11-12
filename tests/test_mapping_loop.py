@@ -72,6 +72,59 @@ class ControlledBackend:
 
 
 class MappingLoopTests(unittest.TestCase):
+    def test_save_flushes_final_submap_without_foreground_backend_calls(self):
+        lock = threading.RLock()
+        backend = ControlledBackend(propose=False)
+        calls, commits = [], []
+        def flush():
+            calls.append(threading.get_ident())
+            backend.propose = True
+        backend.flush = flush
+        worker = MappingLoopWorker(lock, None, .02, .15, .10,
+                                   lambda *args: lambda: commits.append(args), backend)
+        try:
+            with lock:
+                worker.append(observation(0))
+                worker.append(observation(5))
+            wait_for(worker.ready_for_save)
+            self.assertFalse(commits)
+            with lock:
+                worker.request_flush()
+                self.assertFalse(worker.ready_for_save())
+            wait_for(worker.ready_for_save)
+            self.assertEqual(len(commits), 1)
+            self.assertEqual(calls, [worker.thread.ident])
+            with lock:
+                worker.request_flush()
+                self.assertTrue(worker.ready_for_save())
+            self.assertEqual(len(calls), 1)
+        finally:
+            worker.close()
+
+    def test_failed_final_flush_blocks_save_and_can_retry_without_new_scans(self):
+        lock = threading.RLock()
+        backend = ControlledBackend(propose=False)
+        calls = []
+        def flush():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError('temporary native/submap failure')
+        backend.flush = flush
+        worker = MappingLoopWorker(lock, None, .02, .15, .10, lambda *a: None, backend)
+        try:
+            with lock:
+                worker.append(observation(0))
+                worker.request_flush()
+            wait_for(lambda: worker.report()['state'] == 'error')
+            with lock:
+                self.assertFalse(worker.ready_for_save())
+                worker.request_flush()
+            wait_for(worker.ready_for_save)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(worker.report()['flush_completed'], 1)
+        finally:
+            worker.close()
+
     def test_tail_arriving_during_rebuild_is_corrected_and_never_dropped(self):
         lock = threading.RLock()
         backend = ControlledBackend()

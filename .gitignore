@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-kiss/
+.kiss-deps/
 maps/
 runtime/
