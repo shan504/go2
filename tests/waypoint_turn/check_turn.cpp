@@ -86,14 +86,19 @@ int main(int argc, char ** argv)
   auto clock=node->get_clock();
   require(rcl_enable_ros_time_override(clock->get_clock_handle()) == RCL_RET_OK, "No test clock");
   clockAt(clock, 1);
-  for (const auto & name : {"previous", "patrol"}) {
-    node->declare_parameter(std::string(name)+".required_movement_radius", radius);
-    node->declare_parameter(std::string(name)+".movement_time_allowance", allowance);
-  }
-  node->declare_parameter("patrol.required_movement_angle", angle);
+  auto declare_policy = [&](const std::string & name, double distance, double turn, double time) {
+    node->declare_parameter(name+".required_movement_radius", distance);
+    node->declare_parameter(name+".required_movement_angle", turn);
+    node->declare_parameter(name+".movement_time_allowance", time);
+  };
+  // Keep the historical policies independent of the configured patrol values.
+  declare_policy("previous", 0.10, 0.20, 10.0);
+  declare_policy("prior_pose", 0.10, 0.20, 10.0);
+  declare_policy("patrol", radius, angle, allowance);
   nav2_controller::SimpleProgressChecker previous;
-  nav2_controller::PoseProgressChecker patrol;
+  nav2_controller::PoseProgressChecker prior_pose, patrol;
   previous.initialize(node, "previous"); patrol.initialize(node, "patrol");
+  prior_pose.initialize(node, "prior_pose");
   auto p=pose(0);
   require(previous.check(p) && patrol.check(p), "Baseline refused");
   bool old_failed=false;
@@ -103,15 +108,97 @@ int main(int argc, char ** argv)
     require(patrol.check(p), "In-place turning falsely treated as a stall");
   }
   require(old_failed, "Old XY checker did not reproduce the 10s turning timeout");
-  clockAt(clock, 14+allowance+0.1);
+  std::cout << "PASS official progress check: historical XY-only 10s turn timeout reproduced\n";
+
+  prior_pose.reset(); patrol.reset(); clockAt(clock, 100); p=pose(0);
+  require(prior_pose.check(p) && patrol.check(p), "Pause baseline refused");
+  clockAt(clock, 115);
+  require(!prior_pose.check(p), "Prior 10s Pose policy did not time out during a 15s pause");
+  require(patrol.check(p), "Relaxed policy rejected a 15s pause");
+
+  for (bool turning : {false, true}) {
+    const double start=turning ? 300.0 : 200.0;
+    prior_pose.reset(); patrol.reset(); clockAt(clock, start); p=pose(0);
+    require(prior_pose.check(p) && patrol.check(p), "Slow-motion baseline refused");
+    old_failed=false;
+    for (int second=1; second<=60; ++second) {
+      clockAt(clock, start+second);
+      p=pose(turning ? second*0.006 : 0.0);
+      p.pose.position.x=turning ? 0.0 : second*0.003;
+      old_failed |= !prior_pose.check(p);
+      require(patrol.check(p), "Relaxed policy falsely rejected sustained slow motion");
+    }
+    require(old_failed, "Prior Pose policy did not reproduce slow-motion timeout");
+  }
+  std::cout << "PASS official PoseProgressChecker comparison: old 0.10m/0.20rad/10s fails; configured "
+            << radius << "m/" << angle << "rad/" << allowance
+            << "s accepts 15s pause and 60s slow walking (0.003m/s) / turning (0.006rad/s)\n";
+
+  patrol.reset(); clockAt(clock, 400); p=pose(0);
+  require(patrol.check(p), "Stationary baseline refused");
+  clockAt(clock, 400+allowance);
+  require(patrol.check(p), "Stationary timeout fired before the configured allowance elapsed");
+  clockAt(clock, 400+allowance+0.001);
   require(!patrol.check(p), "A truly stalled robot was allowed indefinitely");
-  patrol.reset(); clockAt(clock, 40); p=pose(0); require(patrol.check(p), "Reset failed");
-  p=pose(0.02); clockAt(clock, 40+allowance+0.1);
-  require(!patrol.check(p), "Small heading jitter incorrectly counted as progress");
-  patrol.reset(); clockAt(clock, 60); p=pose(3.12); require(patrol.check(p), "Reset failed");
-  p=pose(-3.12); clockAt(clock, 60+allowance+0.1);
+
+  patrol.reset(); clockAt(clock, 500); p=pose(0);
+  require(patrol.check(p), "Jitter baseline refused");
+  for (int second=1; second<=int(std::ceil(allowance))+1; ++second) {
+    clockAt(clock, 500+second);
+    p=pose(second%2 ? 0.02 : -0.02);
+    p.pose.position.x=second%2 ? 0.005 : -0.005;
+    p.pose.position.y=-p.pose.position.x;
+    if (second>allowance) {
+      require(!patrol.check(p), "Small position/heading jitter incorrectly counted as progress");
+    } else {
+      require(patrol.check(p), "Jitter test timed out before its allowance");
+    }
+  }
+  patrol.reset(); clockAt(clock, 600); p=pose(3.12);
+  require(patrol.check(p), "Wraparound baseline refused");
+  p=pose(-3.12); clockAt(clock, 600+allowance+0.1);
   require(!patrol.check(p), "Yaw wraparound incorrectly counted as a large turn");
-  std::cout << "PASS official progress check: old XY-only timeout reproduced; real turns survive 10s, stalls/jitter/wraparound still fail\n";
+
+  // A reset after failure and a reset for the next target both get a full allowance.
+  patrol.reset(); clockAt(clock, 700); p=pose(0);
+  require(patrol.check(p), "Reset after timeout did not clear the failed baseline");
+  clockAt(clock, 700+allowance*0.75);
+  require(patrol.check(p), "Reset did not grant the configured allowance");
+  patrol.reset(); require(patrol.check(p), "Next target did not establish a new baseline");
+  clockAt(clock, 700+allowance+1.0);
+  require(patrol.check(p), "Next target inherited the previous target's elapsed time");
+  clockAt(clock, 700+allowance*1.75+0.001);
+  require(!patrol.check(p), "Next target lost stationary timeout protection");
+  std::cout << "PASS official PoseProgressChecker: stationary timeout boundary, tiny XY/yaw jitter, yaw wraparound and new-target reset\n";
+
+  // Exercise real rclcpp parameter callbacks on an initialized plugin, without restarting it.
+  declare_policy("runtime", 0.10, 0.20, 10.0);
+  nav2_controller::PoseProgressChecker runtime;
+  runtime.initialize(node, "runtime"); clockAt(clock, 800); p=pose(0);
+  require(runtime.check(p), "Runtime policy baseline refused");
+  clockAt(clock, 815);
+  require(!runtime.check(p), "Runtime fixture did not begin with the old 10s policy");
+  const auto updated=node->set_parameters_atomically({
+    rclcpp::Parameter("runtime.required_movement_radius", radius),
+    rclcpp::Parameter("runtime.required_movement_angle", angle),
+    rclcpp::Parameter("runtime.movement_time_allowance", allowance)});
+  require(updated.successful, "Runtime progress parameter update was refused");
+  require(runtime.check(p), "Runtime timeout change did not take effect without restart");
+  clockAt(clock, 819); p.pose.position.x=radius+0.01;
+  require(runtime.check(p), "Runtime movement-radius update refused a qualifying move");
+  clockAt(clock, 819+allowance-1.0);
+  require(runtime.check(p), "Runtime movement-radius callback failed to reset the baseline");
+  clockAt(clock, 819+allowance+0.001);
+  require(!runtime.check(p), "Runtime update removed stationary timeout protection");
+  runtime.reset(); clockAt(clock, 900); p=pose(0);
+  require(runtime.check(p), "Runtime turn baseline refused");
+  clockAt(clock, 919); p=pose(angle+0.01);
+  require(runtime.check(p), "Runtime movement-angle update refused a qualifying turn");
+  clockAt(clock, 919+allowance-1.0);
+  require(runtime.check(p), "Runtime movement-angle callback failed to reset the baseline");
+  clockAt(clock, 919+allowance+0.001);
+  require(!runtime.check(p), "Runtime turn reset removed stationary timeout protection");
+  std::cout << "PASS official PoseProgressChecker: atomic live update changes time/radius/angle without node restart\n";
 
   auto tf=std::make_shared<tf2_ros::Buffer>(clock);
   auto listener=std::make_shared<tf2_ros::TransformListener>(*tf, node, true);
@@ -131,6 +218,7 @@ int main(int argc, char ** argv)
   map->setRobotFootprint(footprint);
   TurnFixture shim;
   shim.initialize(node, tf, map, threshold, release, sample, yaw_speed, accel, ahead, closed_loop, forward);
+  double turn_start=1000.0;
   for (double target : {2.2, -2.2, 3.13, -3.13}) {
     double heading=0.0;
     nav_msgs::msg::Path path; path.header.frame_id="map";
@@ -141,7 +229,7 @@ int main(int argc, char ** argv)
     shim.deactivate(); shim.activate(); shim.setPlan(path);
     bool handed_off=false; int turns=0; double max_command=0.0;
     for (int step=0; step<200; ++step) {
-      clockAt(clock, 100+step*.1); p=pose(heading);
+      clockAt(clock, turn_start+step*.1); p=pose(heading);
       geometry_msgs::msg::TransformStamped transform;
       transform.header.frame_id="map"; transform.child_frame_id="base_footprint";
       transform.header.stamp=clock->now(); transform.transform.rotation=p.pose.orientation;
@@ -163,6 +251,7 @@ int main(int argc, char ** argv)
     }
     require(handed_off && turns>0, "New waypoint never transitioned from turning to walking");
     require(std::abs(max_command-yaw_speed)<1e-9, "Dedicated path turn did not reach its requested yaw rate");
+    turn_start += 30.0;
   }
   std::cout << "PASS official rotation shim: left/right 126deg and 179deg paths, 1Hz replans, zero measured yaw; reaches "
             << yaw_speed << "rad/s turn output then hands off to 0.30m/s tracker\n";

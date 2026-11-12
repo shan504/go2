@@ -18,7 +18,8 @@ module.main()
 params = yaml.safe_load(Path('/runtime/config/nav2_3d.yaml').read_text())
 from motion_profile import (LINEAR_SPEED, YAW_SPEED, PATH_TURN_SPEED, TRACKING_YAW_SPEED,
                             LINEAR_ACCELERATION, YAW_ACCELERATION, TRAJECTORY_TIME,
-                            ARRIVAL_RADIUS, PATH_HEADING_THRESHOLD, PATH_HEADING_RELEASE, PROGRESS_ANGLE)
+                            ARRIVAL_RADIUS, PATH_HEADING_THRESHOLD, PATH_HEADING_RELEASE,
+                            PROGRESS_DISTANCE, PROGRESS_ANGLE, PROGRESS_TIMEOUT)
 follow = params['controller_server']['ros__parameters']['FollowPath']
 smoother = params['velocity_smoother']['ros__parameters']
 assert follow['max_vel_x'] == follow['max_speed_xy'] == smoother['max_velocity'][0] == LINEAR_SPEED == 0.30
@@ -46,9 +47,10 @@ checker = params['controller_server']['ros__parameters']['general_goal_checker']
 assert checker['xy_goal_tolerance'] == ARRIVAL_RADIUS == 0.30
 assert checker['yaw_goal_tolerance'] == math.pi and checker['stateful'] is False
 assert 'RotateToGoal' not in follow['critics']
-assert params['controller_server']['ros__parameters']['progress_checker']['movement_time_allowance'] == 10.0
+assert params['controller_server']['ros__parameters']['progress_checker']['movement_time_allowance'] == PROGRESS_TIMEOUT == 30.0
 assert params['controller_server']['ros__parameters']['progress_checker']['plugin'] == 'nav2_controller::PoseProgressChecker'
-assert params['controller_server']['ros__parameters']['progress_checker']['required_movement_angle'] == PROGRESS_ANGLE
+assert params['controller_server']['ros__parameters']['progress_checker']['required_movement_radius'] == PROGRESS_DISTANCE == 0.05
+assert params['controller_server']['ros__parameters']['progress_checker']['required_movement_angle'] == PROGRESS_ANGLE == 0.10
 assert 'amcl' not in params
 for name in ('local_costmap','global_costmap'):
     cfg = params[name][name]['ros__parameters']
@@ -83,4 +85,4 @@ behavior = ET.parse(root/'go2_3d/navigate.xml')
 assert not list(behavior.iter('Spin')) and not list(behavior.iter('BackUp'))
 assert list(behavior.iter('FollowPath'))[0].get('goal_checker_id') == 'general_goal_checker'
 assert all(p.read_bytes() == content for p,content in before.items())
-print('PASS SDK configuration: 0.30m/s forward and 0.30rad/s tracking retained; 0.50rad/s dedicated path-turn envelope; 0.30m position-only arrival, collision geometry and genuine stall timeout retained; protected SDK source unchanged')
+print('PASS SDK configuration: 0.30m/s forward and 0.30rad/s tracking retained; 0.50rad/s dedicated path-turn envelope; 0.30m position-only arrival and collision geometry retained; progress 0.05m/0.10rad/30s; protected SDK source unchanged')

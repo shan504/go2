@@ -430,7 +430,7 @@ bash go2_3d/tools.sh inflation-5cm
 全局规划的距离缓冲因此减少，DWB 的 `ObstacleFootprint` 仍检查真实外形；一条全局路径
 不能据此保证控制器可执行。当前实机日志已到达控制器，随后报 `Failed to make progress`。
 运动禁用时选目标会显示 `Goal queued`，直到启用参数确认后才发送 Nav2 action，
-等待不会消耗进展检查的10秒时间。每条新路线先连续设置 `/goal_pose`，再启用一次；
+等待不会消耗进展检查的30秒时间。每条新路线先连续设置 `/goal_pose`，再启用一次；
 等待期间每次点选都追加，停止/取消清空路线，定位失效则保留并暂停。
 
 `tools.sh navcheck X Y` 新增 `/cmd_vel_nav`、`/cmd_vel` 消息数/非零数/速度峰值及里程计位移。
@@ -449,8 +449,30 @@ bash go2_3d/tools.sh inflation-5cm
 保持 0.60rad/s² 加速度限制，按命令开环递增，避免尚未迈步时接近零的里程计角速度阻止起步。
 每秒重新规划的路径仍经过这一检查，转向使用 Nav2 原有的真实外形碰撞检查；
 遇到转向碰撞会退回 DWB，仍可能无法通过狭窄区域，不绕过障碍。
-`PoseProgressChecker` 将位置移动 10cm 或朝向改变约 11.5° 视为进展，
-真正既不前进也不转身仍按原来的 10 秒超时；终点仍只要求位置进入 30cm，不要求朝向。
+`PoseProgressChecker` 将相对上次基准位置移动超过 5cm 或朝向改变超过约 5.7° 视为进展，
+重新开始计时；连续 30 秒未达到任一门槛才判无进展失败（此前为 10cm／11.5°／10秒）。
+该设置适用于所有地图；终点仍只要求位置进入 30cm，不要求朝向。
+
+已启动的旧版本若同样加载 `PoseProgressChecker`，可在机器狗 SSH 终端即时放宽，无需重启导航：
+
+```bash
+sudo docker exec go2-3d bash -c '
+source /opt/ros/humble/setup.bash
+ros2 param set /controller_server progress_checker.movement_time_allowance 30.0
+ros2 param set /controller_server progress_checker.required_movement_radius 0.05
+ros2 param set /controller_server progress_checker.required_movement_angle 0.10
+'
+```
+
+确认三项均显示 `Set parameter successful`。若路线已因无进展失败暂停，执行
+`bash go2_3d/tools.sh resume` 重试保留的失败点并继续队列；单独启用运动不会重试失败目标。
+即时修改只影响当前进程；更新仓库后下次正常启动由共享配置保留新值。
+2026-11-12 上传日志中，第2点在16:52:57因无进展被中止，当时定位仍有效；
+这次调整提高慢走和短暂停留的容忍度，不把失败改成成功，也不跳过点位。
+官方 Humble C++ 检查器回归验证15秒暂停、60秒慢走/慢转、运行时参数更新通过，
+静止超过30秒、小幅位姿抖动仍超时；ROS队列回归验证失败点重试、停止和取消。
+上述为云端测试，实际农场运行效果仍需实机确认。
+
 启动前检查这两个插件及 shim 的开环支持；旧镜像缺少支持时需先执行 `bash go2_3d/build.sh`。
 `motioncheck` 回读实际插件/转向参数并报告里程计最大朝向变化，区分“有转向命令”与“实际转身”。
 该转速用于验证本机响应：现场0.30rad/s的209条旋转命令通过运动桥，但里程计仅记录2.1°，
@@ -641,7 +663,7 @@ SDK 原配置除25厘米位置容差外，还要求朝向误差≤0.25rad（约1
 按用户巡检要求，现用官方 SimpleGoalChecker 将**当前平面距离≤0.30m**视为到达，
 yaw容差为π、stateful=false，任何终点朝向都允许；每次仍重新检查当前位置。
 删除DWB末端RotateToGoal阶段，行为树显式指定general_goal_checker。
-目标外的10秒无进展超时保留，实际外形、障碍检查和速度配置不变。
+目标外的无进展超时现为30秒，实际外形、障碍检查和速度配置不变。
 Foxglove仍需两次单击形成目标消息；第二次的箭头不再要求狗在终点转向对齐。
 
 保持当前容器运行和狗静止，用 `git pull --ff-only` 后的 `tools.sh restart-navigation`
