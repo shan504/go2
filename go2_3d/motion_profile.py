@@ -15,9 +15,7 @@ FORWARD_SAMPLES = 2
 ARRIVAL_RADIUS = 0.30
 PATH_HEADING_THRESHOLD = 0.35
 PATH_HEADING_RELEASE = 0.20
-PROGRESS_DISTANCE = 0.05
-PROGRESS_ANGLE = 0.10
-PROGRESS_TIMEOUT = 30.0
+PROGRESS_ANGLE = 0.20
 
 
 def configure_navigation(nav):
@@ -37,13 +35,11 @@ def configure_navigation(nav):
                   closed_loop=False)
     # Recognize actual heading progress instead of mistaking an in-place
     # turn for a positional stall, independently of the requested turn rate.
-    # Allow slow farm walking and temporary pauses without abandoning the
-    # route after 10s. A genuinely stationary robot still fails after 30s.
+    # A genuinely stationary robot still fails after the same 10s deadline.
     controller['progress_checker'].update(
         plugin='nav2_controller::PoseProgressChecker',
-        required_movement_radius=PROGRESS_DISTANCE,
-        required_movement_angle=PROGRESS_ANGLE,
-        movement_time_allowance=PROGRESS_TIMEOUT)
+        required_movement_radius=0.10, required_movement_angle=PROGRESS_ANGLE,
+        movement_time_allowance=10.0)
     # StandardTrajectoryGenerator samples across sim_time, rather than one
     # controller tick. From rest, 0.4 * 1.2 reaches the verified 0.30m/s.
     # Two X samples retain 0 for turns and 0.30 for forward trajectories.

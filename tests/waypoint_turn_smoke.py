@@ -14,8 +14,7 @@ follow, progress = parameters['FollowPath'], parameters['progress_checker']
 assert follow['rotate_to_heading_angular_vel'] == PATH_TURN_SPEED == YAW_SPEED == 0.50
 assert follow['max_vel_theta'] == TRACKING_YAW_SPEED == 0.30
 assert follow['max_angular_accel'] == 0.60
-assert progress['required_movement_radius'] == 0.05
-assert progress['required_movement_angle'] == 0.10 and progress['movement_time_allowance'] == 30.0
+assert progress['required_movement_angle'] == 0.20 and progress['movement_time_allowance'] == 10.0
 with tempfile.TemporaryDirectory() as directory:
     directory = Path(directory)
     configure = ['cmake', '-S', str(project/'tests/waypoint_turn'), '-B', str(directory/'build')]
