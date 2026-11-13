@@ -25,7 +25,8 @@ def main():
         (directory/'metadata.yaml').write_text(yaml.safe_dump(
             dict(ground_model=dict(plane=[0., 0., 1., 0.3]))))
         rclpy.init(args=['--ros-args', '-p', 'mode:=localization',
-                        '-p', f'map_directory:={tmp}', '-p', 'scan_window:=0.0'])
+                        '-p', f'map_directory:={tmp}', '-p', 'scan_window:=0.0',
+                        '-p', 'publish_map_cloud:=false'])
         mapper, sensors = Mapper(), Sensors()
         sensors.packet_wait = 0.03
         sensors.points = np.zeros((3, 3))
@@ -68,6 +69,9 @@ def main():
             accepted, reference = mapper.last_accepted, mapper.correction.copy()
             raw = mapper.accepted_match_correction.copy()
             bad_scans()
+            assert mapper.p['localization_hold_timeout'] == 5.0
+            assert mapper.p['localization_hold_distance'] == 1.5
+            assert mapper.p['localization_hold_rotation_degrees'] == 90.0
             # Follow real moving odometry during rejected matches, beyond 1s.
             for x in (0.1, 0.2, 0.3):
                 sensors.odom = pose_matrix([x, 0, 0], [0, 0, 0, 1])
@@ -82,35 +86,46 @@ def main():
             body = transform_matrix(sensors.buffer.lookup_transform('map', 'base_link', Time()).transform)
             np.testing.assert_allclose(body, reference@sensors.odom, atol=0.02)
             assert sensors.correction_stamp() <= sensors.get_clock().now().nanoseconds
-            wait_for(lambda: mapper.localization_state == 'registration_timeout', seconds=4)
+            wait_for(lambda: time.monotonic()-accepted > 3.3, seconds=4)
+            assert sensors.valid is True and mapper.localization_state == 'odometry_hold'
+            assert mapper.last_accepted == accepted, 'Rejected scans renewed the original hold deadline'
+            wait_for(lambda: mapper.localization_state == 'registration_timeout', seconds=3)
             wait_for(lambda: sensors.valid is False)
             stamp = sensors.correction_stamp()
             time.sleep(0.2)
             assert sensors.correction_stamp() == stamp
             assert mapper.last_accepted == accepted
-            print('PASS rejected scans: >1s real-odom TF hold; original 3s deadline stops validity/TF without renewing accepted pose/time', flush=True)
+            print('PASS rejected scans: fresh real-odom TF hold remains valid beyond 3s; '
+                  '5s deadline stops validity/TF without renewing accepted pose/time', flush=True)
 
             recover()
             bad_scans()
             # Both outward and return motion consume the distance budget.
-            sensors.odom = pose_matrix([0.6, 0, 0], [0, 0, 0, 1])
-            wait_for(lambda: mapper.odom_budget.distance >= 0.59)
+            sensors.odom = pose_matrix([0.8, 0, 0], [0, 0, 0, 1])
+            wait_for(lambda: mapper.odom_budget.distance >= 0.79)
+            sensors.odom = pose_matrix([0.4, 0, 0], [0, 0, 0, 1])
+            wait_for(lambda: mapper.odom_budget.distance >= 1.19)
+            assert sensors.valid is True
             sensors.odom = np.eye(4)
             wait_for(lambda: mapper.localization_state == 'odometry_distance_limit')
-            assert mapper.odom_budget.distance >= 1.19
+            assert mapper.odom_budget.distance >= 1.59
             time.sleep(0.15)
             assert mapper.localization_state == 'odometry_distance_limit'
-            print('PASS cumulative 1m travel budget: a round trip cannot replenish it', flush=True)
+            print('PASS cumulative travel: valid at 1.2m; 1.5m limit stops a round trip without replenishment', flush=True)
 
             recover()
             bad_scans()
-            angle = np.deg2rad(40)/2
+            angle = np.deg2rad(50)/2
             sensors.odom = pose_matrix([0, 0, 0], [0, 0, np.sin(angle), np.cos(angle)])
-            wait_for(lambda: mapper.odom_budget.angle >= np.deg2rad(39))
+            wait_for(lambda: mapper.odom_budget.angle >= np.deg2rad(49))
+            angle = np.deg2rad(20)/2
+            sensors.odom = pose_matrix([0, 0, 0], [0, 0, np.sin(angle), np.cos(angle)])
+            wait_for(lambda: mapper.odom_budget.angle >= np.deg2rad(79))
+            assert sensors.valid is True
             sensors.odom = np.eye(4)
             wait_for(lambda: mapper.localization_state == 'odometry_angle_limit')
-            assert mapper.odom_budget.angle >= np.deg2rad(79)
-            print('PASS cumulative 60deg turn budget: opposite turns cannot replenish it', flush=True)
+            assert mapper.odom_budget.angle >= np.deg2rad(99)
+            print('PASS cumulative turns: valid at 80deg; 90deg limit stops opposite turns without replenishment', flush=True)
 
             recover()
             sensors.odom_enabled = False

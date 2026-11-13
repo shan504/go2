@@ -1,5 +1,6 @@
 """Native Go2 DDS, camera, 3D GICP; optional Nav2, with no AMCL/2D SLAM."""
 from pathlib import Path
+import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction, OpaqueFunction
@@ -45,7 +46,7 @@ def generate_launch_description():
             # Use the indoor-verified 0.5s accumulation for patrol localization.
             # Registration downsampling controls CPU cost separately from the
             # complete saved PCD and from the original 1s freshness deadline.
-            parameters.append({'scan_window': 0.5})
+            parameters.append({'scan_window': 0.5, 'publish_map_cloud': False})
         remappings = []
         if LaunchConfiguration('loop_backend').perform(context) == 'rtabmap':
             parameters.append({'mapping_backend': 'rtabmap', 'map_frame': 'gicp_odom',
@@ -53,9 +54,23 @@ def generate_launch_description():
             remappings = [('/map_cloud', '/gicp/map_cloud'),
                           ('/registered_cloud', '/gicp/registered_cloud'),
                           ('/save_3d_map', '/gicp/save_unoptimized_map')]
-        return [Node(executable='/usr/bin/python3', name='go2_gicp', output='screen',
-                     arguments=[str(root/'go2_3d/mapper.py')], parameters=parameters,
-                     remappings=remappings)]
+        nodes = [Node(executable='/usr/bin/python3', name='go2_gicp', output='screen',
+                      arguments=[str(root/'go2_3d/mapper.py')], parameters=parameters,
+                      remappings=remappings)]
+        if mode.perform(context) != 'mapping':
+            # These YAML files target go2_gicp, so explicitly carry only the
+            # visualization settings into the separately named publisher.
+            # Preserve profile order and the same selected runtime map.
+            visualization = {'map_publish_period': 2.0, 'map_frame': 'map'}
+            for filename in (root/'go2_3d/gicp.yaml',
+                             Path(LaunchConfiguration('gicp_params').perform(context))):
+                profile = yaml.safe_load(filename.read_text()) or {}
+                values = profile.get('go2_gicp', {}).get('ros__parameters', {})
+                visualization.update({key: values[key] for key in visualization if key in values})
+            nodes.append(Node(executable='/usr/bin/python3', name='go2_saved_map_cloud', output='screen',
+                              arguments=[str(root/'go2_3d/saved_map_cloud.py')],
+                              parameters=[dict(visualization, map_directory='/runtime/navigation_map')]))
+        return nodes
 
     return LaunchDescription([
         DeclareLaunchArgument('mode',default_value='mapping',choices=['mapping','localization','navigation']),

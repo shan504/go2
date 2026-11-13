@@ -56,6 +56,8 @@ bash go2_3d/run.sh navigation dense
 恢复范围、离线验证及已知点位/TF问题见 [有限导航恢复](docs/NAVIGATION_RETRY.md)。
 定位正常却摆动/无进展时的控制接口修复、自动诊断及首次镜像重建步骤见
 [控制停滞处理](docs/NAVIGATION_CONTROL_STALL.md)。
+定位心跳/TF 超时及完整地图显示发布的进程隔离，见
+[地图发布与导航时效](docs/NAVIGATION_MAP_PUBLICATION.md)。
 导航现在自动保存故障前后证据和原始日志；停车后用 `bash go2_3d/tools.sh fault-show latest` 查看原因，
 用 `bash go2_3d/tools.sh fault-export latest` 导出诊断包。命令、保留策略和文件内容见
 [故障记录说明](docs/NAVIGATION_FAULT_RECORDS.md)。
@@ -150,8 +152,8 @@ Foxglove 的兼容发送缓冲配置为 256 MiB，1000万 XYZ 点单帧约 114.4
 由 `stationary_translation_limit`、`stationary_rotation_limit_degrees` 配置；
 超过该限度的大跳变立即使定位无效，不放宽正常跟踪门限接受它；自动重定位另行搜索并验证候选，
 明确重新发布初始位姿仍可建立新的校正。
-缺帧、低质量匹配或计算结果过期时丢弃本次结果，最多沿用上次合格扫描3秒；
-还受从该次合格扫描起累计里程计路程1米、累计转角60°限制，折返或反向旋转不能重置预算。
+缺帧、低质量匹配或计算结果过期时丢弃本次结果，最多沿用上次合格扫描5秒；
+还受从该次合格扫描起累计里程计路程1.5米、累计转角90°限制，折返或反向旋转不能重置预算。
 保持期间只用原有合格校正和真实新鲜里程计推进TF，拒绝的结果不更新校正、参考位姿或合格时间。
 点云必须在1秒内且时间戳有效，里程计TF必须在0.3秒内；任一条件超限即定位失效，停止续发地图TF。
 首次启动和显式重定位仍必须先通过GICP；非有限结果、超出校正容差的跳变仍立即使定位失效。
