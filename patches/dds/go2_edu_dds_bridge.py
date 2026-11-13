@@ -37,6 +37,10 @@ class Go2EduBridge(Node):
         self.gate.set_enabled(self.get_parameter("enable_control").value)
         self.odom_received = None
         self.cloud_received = None
+        self.first_odom_stamp_ns = None
+        self.last_cloud_source_ns = None
+        self.sensor_timing = {}
+        self._reported_clock_state = None
         self.tf = TransformBroadcaster(self)
         self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
         self.cloud_pub = self.create_publisher(PointCloud2, "/point_cloud2", qos_profile_sensor_data)
@@ -48,6 +52,25 @@ class Go2EduBridge(Node):
         self.create_timer(0.05, self.control_tick)
         self.get_logger().info("EDU DDS bridge ready: cloud_base -> point_cloud2; robot_odom -> odom + TF")
         self.get_logger().info("enable_control=%s" % self.gate.enabled)
+
+    def record_sensor_timing(self, source, raw_ns, mapped_ns, now_ns, accepted, reason):
+        self.sensor_timing[source] = dict(raw_stamp_ns=raw_ns, host_receipt_ns=now_ns,
+            mapped_stamp_ns=mapped_ns,
+            mapped_age_s=None if mapped_ns is None else (now_ns-mapped_ns)/1e9,
+            accepted=accepted, reason=reason)
+        status = self.clock_map.status()
+        state = status['state']
+        if state != self._reported_clock_state:
+            self._reported_clock_state = state
+            text = 'Sensor clock state: '+json.dumps(status, sort_keys=True)
+            if state == 'fault':
+                self.get_logger().error(text+'; sensor relay stopped; restart after host clock is stable')
+            else:
+                self.get_logger().info(text)
+        if reason in ('sensor_time_in_future', 'ros_clock_jump', 'monotonic_clock_regressed'):
+            self.get_logger().error('Sensor clock rejected sample: '+json.dumps(
+                dict(source=source, clock=status, sample=self.sensor_timing[source]), sort_keys=True),
+                throttle_duration_sec=2.0)
 
     def on_parameters(self, params):
         for param in params:
@@ -65,16 +88,17 @@ class Go2EduBridge(Node):
                                     throttle_duration_sec=5.0)
             return
         sensor_ns = stamp_ns(msg.header.stamp)
-        was_unset = self.clock_map.offset_ns is None
-        previous_offset = self.clock_map.offset_ns
+        clock_before_ns = time.monotonic_ns()
         now_ns = self.get_clock().now().nanoseconds
-        if not self.clock_map.observe_odom(sensor_ns, now_ns):
-            return
-        if was_unset or previous_offset != self.clock_map.offset_ns:
-            self.get_logger().info("Common sensor timestamp offset: %.3f s" % (self.clock_map.offset_ns / 1e9))
+        clock_after_ns = time.monotonic_ns()
+        accepted = self.clock_map.observe_odom_sample(
+            sensor_ns, now_ns, clock_before_ns, clock_after_ns)
         shifted_ns = self.clock_map.convert(sensor_ns)
-        # Discard old/replayed samples rather than presenting them as fresh.
-        if abs(now_ns - shifted_ns) > 1_000_000_000:
+        self.record_sensor_timing('odom', sensor_ns, shifted_ns, now_ns, accepted,
+                                  self.clock_map.status()['last_rejection_reason'])
+        if not accepted:
+            if self.clock_map.status()['state'] != 'ready':
+                self.odom_received = self.cloud_received = None
             return
         out = copy.deepcopy(msg)
         set_stamp(out.header.stamp, shifted_ns)
@@ -87,6 +111,8 @@ class Go2EduBridge(Node):
         tf.transform.translation.z = out.pose.pose.position.z
         tf.transform.rotation = copy.deepcopy(out.pose.pose.orientation)
         self.tf.sendTransform(tf)
+        if self.first_odom_stamp_ns is None:
+            self.first_odom_stamp_ns = shifted_ns
         self.odom_received = time.monotonic()
 
     def on_cloud(self, msg):
@@ -94,13 +120,24 @@ class Go2EduBridge(Node):
             self.get_logger().error("Ignoring unexpected cloud frame; expected base_link",
                                     throttle_duration_sec=5.0)
             return
-        shifted_ns = self.clock_map.convert(stamp_ns(msg.header.stamp))
-        if shifted_ns is None or abs(self.get_clock().now().nanoseconds - shifted_ns) > 1_000_000_000:
+        raw_ns = stamp_ns(msg.header.stamp)
+        shifted_ns = self.clock_map.convert(raw_ns)
+        now_ns = self.get_clock().now().nanoseconds
+        reason = ('clock_not_ready' if shifted_ns is None else
+                  'cloud_duplicate_or_reordered' if self.last_cloud_source_ns is not None and
+                      raw_ns <= self.last_cloud_source_ns else
+                  'sensor_time_in_future' if shifted_ns-now_ns > 100_000_000 else
+                  'sensor_time_stale' if now_ns-shifted_ns > 1_000_000_000 else
+                  'before_odom_history' if self.first_odom_stamp_ns is None or
+                      shifted_ns < self.first_odom_stamp_ns else None)
+        self.record_sensor_timing('cloud', raw_ns, shifted_ns, now_ns, reason is None, reason)
+        if reason is not None:
             return
         # Coordinates are already in base_link: preserve them and their relative timestamps.
         msg.header = copy.deepcopy(msg.header)
         set_stamp(msg.header.stamp, shifted_ns)
         self.cloud_pub.publish(msg)
+        self.last_cloud_source_ns = raw_ns
         self.cloud_received = time.monotonic()
 
     def on_cmd(self, msg):

@@ -398,6 +398,7 @@ def render_report(summary, evidence=None):
     labels = {'progress_timeout': '控制器进度超时', 'planner_failed': '全局规划失败',
               'planner_failure': '全局规划失败', 'localization_lost': '定位丢失或失效',
               'tf_error': '坐标变换错误', 'manual_stop': '人工停止或取消',
+              'sensor_clock_error': '传感器时钟转换异常',
               'manual_cancel': '人工停止或取消', 'process_exit': '导航进程异常退出',
               'navigation_failure': '导航失败（需结合原始证据）',
               'controller_no_valid_trajectory': '控制器没有有效轨迹',

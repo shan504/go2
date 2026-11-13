@@ -57,6 +57,8 @@ def classify_log(name, level, message):
     if not any(part in name for part in relevant):
         return None
     lower = message.lower()
+    if 'sensor clock rejected sample' in lower or ('sensor clock state:' in lower and level >= 40):
+        return 'sensor_clock_error'
     if 'failed to make progress' in lower:
         return 'progress_timeout'
     if ('failed to create plan' in lower or 'failed to generate a valid path' in lower or

@@ -3,6 +3,7 @@
 import sys
 import time
 import math
+import json
 from collections import OrderedDict
 sys.path.insert(0, '/opt/go2_project/patches/dds')
 import rclpy
@@ -152,6 +153,10 @@ class LocalizedBridge(Go2EduBridge):
                 f'Stop_requests={self.stop_requests}')
         text += (f'; latest_state_age={age(self.localization_state_received):.2f}s '
                  f'latest_mapper_{self.localization_state}')
+        # Receipt ages above are not acquisition/header ages. Keep both plus
+        # raw/converted stamps so clock bias cannot masquerade as stale data.
+        text += '; sensor_clock='+json.dumps(self.clock_map.status(), separators=(',', ':'))
+        text += '; sensor_timing='+json.dumps(self.sensor_timing, separators=(',', ':'))
         text += (f'; cmd_received={self.cmd_received} cmd_nonzero={self.cmd_nonzero} '
                  f'cmd_gate_accepted={self.cmd_gate_accepted} cmd_dropped={self.cmd_dropped}')
         if self.last_raw_cmd is not None:

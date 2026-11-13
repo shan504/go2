@@ -13,12 +13,14 @@ class ClockTest(unittest.TestCase):
     def test_shared_offset_preserves_sensor_timing(self):
         clock = SensorClock()
         self.assertIsNone(clock.convert(1))
-        self.assertTrue(clock.observe_odom(100_000_000_000, 1_000_000_000_000))
+        for step in range(6):
+            self.assertEqual(clock.observe_odom(100_000_000_000+step*100_000_000,
+                1_000_000_000_000+step*100_000_000, 10_000_000_000+step*100_000_000), step == 5)
         self.assertEqual(clock.convert(100_100_000_000) - clock.convert(100_000_000_000), 100_000_000)
         # Transport delay on a later odometry sample must not change the offset.
-        self.assertTrue(clock.observe_odom(101_000_000_000, 1_001_100_000_000))
+        self.assertTrue(clock.observe_odom(101_000_000_000, 1_001_100_000_000, 11_100_000_000))
         self.assertEqual(clock.convert(101_000_000_000), 1_001_000_000_000)
-        self.assertFalse(clock.observe_odom(99_000_000_000, 1_002_000_000_000))
+        self.assertFalse(clock.observe_odom(99_000_000_000, 1_002_000_000_000, 12_000_000_000))
         self.assertEqual(clock.offset_ns, 900_000_000_000)
 
 

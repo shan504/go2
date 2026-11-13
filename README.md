@@ -57,6 +57,8 @@ bash go2_3d/run.sh navigation dense
 按用户要求，核心定位和控制器恢复到 **2026-11-05 的 d4244dc**，使用官方 RotationShim + DWB。
 保留点位保存/加载、连续派发、三次有限重试和自动故障采集；新增自定义控制器、独立地图显示
 及 5 秒定位接续配置停用。具体对比和更新说明见 [11 月 5 日导航恢复](docs/NAVIGATION_NOV5_RESTORE.md)。
+恢复后出现的 `odom_age` 负值/未来时间戳，另以 [DDS 启动校时修复](docs/NATIVE_SENSOR_CLOCK.md)
+处理；该接口修改保留上述核心定位与导航配置。
 导航现在自动保存故障前后证据和原始日志；停车后用 `bash go2_3d/tools.sh fault-show latest` 查看原因，
 用 `bash go2_3d/tools.sh fault-export latest` 导出诊断包。命令、保留策略和文件内容见
 [故障记录说明](docs/NAVIGATION_FAULT_RECORDS.md)。

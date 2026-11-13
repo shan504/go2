@@ -116,6 +116,12 @@ class FlightRecorderTests(unittest.TestCase):
         self.assertEqual(classify_log('DWBLocalPlanner', 40, 'No valid trajectories'), 'controller_no_valid_trajectory')
         self.assertEqual(classify_log('transformPoseInTargetFrame', 40, 'Extrapolation error'), 'tf_error')
         self.assertIsNone(classify_log('unrelated_server', 40, 'Failed'))
+        self.assertIsNone(classify_log('go2_edu_dds_bridge', 20,
+                                      'Sensor clock state: {"state":"calibrating"}'))
+        self.assertEqual(classify_log('go2_edu_dds_bridge', 40,
+            'Sensor clock rejected sample: sensor_time_in_future'), 'sensor_clock_error')
+        self.assertEqual(classify_log('go2_edu_dds_bridge', 40,
+            'Sensor clock state: {"state":"fault"}'), 'sensor_clock_error')
 
     def test_binary_grid_has_explicit_roundtrip_encoding_and_nonfinite_is_marked(self):
         result = json_safe(dict(raw=b'\x00\xff\x64', value=float('nan')))
