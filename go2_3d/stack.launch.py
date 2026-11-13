@@ -103,6 +103,8 @@ def generate_launch_description():
             }.items()),
         Node(executable='/usr/bin/python3',name='go2_operator',output='screen',
              arguments=[str(root/'go2_3d/operator_bridge.py')],parameters=[{'mode':mode}]),
+        Node(executable='/usr/bin/python3',name='go2_navigation_diagnostics',output='screen',
+             condition=navigation,arguments=[str(root/'go2_3d/navigation_diagnostics.py')]),
         Node(package='pointcloud_to_laserscan',executable='pointcloud_to_laserscan_node',output='screen',
              condition=navigation,remappings=[('cloud_in','/navigation/obstacle_cloud'),('scan','/scan')],
              parameters=[{'target_frame':'base_link','min_height':-10.0,'max_height':10.0,

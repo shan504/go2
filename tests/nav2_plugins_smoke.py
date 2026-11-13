@@ -12,12 +12,14 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 if os.environ.get('GO2_NAV2_SOURCE'):
     source = Path(os.environ['GO2_NAV2_SOURCE'])
-    module.get_package_share_directory = lambda package: str(source/package)
+    module.get_package_share_directory = lambda package: str(
+        project/'navigation/go2_navigation' if package == 'go2_navigation' else source/package)
 else:
     source = None
 with tempfile.TemporaryDirectory() as directory:
     prefix = Path(directory)
-    module.get_package_prefix = lambda package: str(prefix)
+    module.get_package_prefix = lambda package: (str(prefix) if package == 'nav2_rotation_shim_controller'
+                                                else get_package_prefix(package))
     relative = Path('nav2_rotation_shim_controller/nav2_rotation_shim_controller.hpp')
     if source:
         content = (source/'nav2_rotation_shim_controller/include'/relative).read_text()
@@ -36,6 +38,16 @@ with tempfile.TemporaryDirectory() as directory:
         assert 'open-loop rotation support' in str(error) and 'build.sh' in str(error)
     else:
         raise AssertionError('Old shim silently ignored closed_loop=false')
+    header.write_text(content)
+    available_share = module.get_package_share_directory
+    module.get_package_share_directory = lambda package: (str(prefix/'missing') if package == 'go2_navigation'
+                                                          else available_share(package))
+    try:
+        module.check()
+    except RuntimeError as error:
+        assert 'PathAlignmentController' in str(error) and 'build.sh' in str(error)
+    else:
+        raise AssertionError('Image without the navigation plugin accepted')
     module.get_package_share_directory = lambda package: str(prefix/'missing'/package)
     try:
         module.check()

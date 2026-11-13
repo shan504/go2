@@ -1,0 +1,6 @@
+<library path="go2_path_alignment">
+  <class name="go2_navigation::PathAlignmentController"
+         type="go2_navigation::PathAlignmentController" base_class_type="nav2_core::Controller">
+    <description>Path alignment using fresh latest TF, official collision-checked rotation and DWB tracking.</description>
+  </class>
+</library>

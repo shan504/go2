@@ -57,7 +57,7 @@ sudo docker image inspect "$image" >/dev/null
 if [[ "$mode" == navigation ]]; then
   sudo docker run --rm --network none --entrypoint /bin/bash \
     -v "$project_dir/maps:/maps:ro" -v "$project_dir:/opt/go2_project:ro" go2-3d:edu -c \
-    'source /opt/ros/humble/setup.bash && python3 /opt/go2_project/go2_3d/check_nav2_plugins.py'
+    'source /opt/ros/humble/setup.bash && if [[ -f /opt/go2_navigation/setup.bash ]]; then source /opt/go2_navigation/setup.bash; fi && python3 /opt/go2_project/go2_3d/check_nav2_plugins.py'
 fi
 # Validate dependencies, SDK assets and generated copies before stopping sensors.
 sudo docker run --rm --network none --entrypoint /bin/bash \
@@ -111,6 +111,7 @@ sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --
   'set -e
    source /opt/ros/humble/setup.bash
    source /ros2_ws/install/setup.bash
+   if [[ "$1" == navigation ]]; then source /opt/go2_navigation/setup.bash; fi
    optional_args=()
    [[ -z "${11}" ]] || optional_args+=("camera_calibration:=${11}")
    [[ -z "${12}" ]] || optional_args+=("session_directory:=${12}")

@@ -49,6 +49,9 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
         assert perform_substitutions(context, buffer_argument) == '536870912'
         context.launch_configurations['send_buffer_limit'] = '268435456'
         # Backend validation is also an OpaqueFunction and returns no nodes.
+        diagnostics = next(action for action in description.entities
+                           if isinstance(action, Node) and action._Node__node_name == 'go2_navigation_diagnostics')
+        assert diagnostics.condition.evaluate(context) == (mode == 'navigation')
         mapper_action = next(action for action in description.entities
                              if isinstance(action, OpaqueFunction) and any(
                                  isinstance(node, Node) and node._Node__node_name == 'go2_gicp'

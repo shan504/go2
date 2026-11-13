@@ -21,10 +21,10 @@ PROGRESS_ANGLE = 0.20
 def configure_navigation(nav):
     controller = nav['controller_server']['ros__parameters']
     follow = controller['FollowPath']
-    # DWB's short-horizon scoring can stall when the next waypoint is behind
-    # the body. The official shim aligns with the NEW PATH before handing
-    # control back to the same DWB tracker and real footprint collision check.
-    follow.update(plugin='nav2_rotation_shim_controller::RotationShimController',
+    # Align with the path using a fresh, explicit latest TF rather than a
+    # clock-now lookup that can fail behind a live 20Hz transform stream.
+    # Keep the official ramp, swept footprint check and same DWB tracker.
+    follow.update(plugin='go2_navigation::PathAlignmentController',
                   primary_controller='dwb_core::DWBLocalPlanner',
                   angular_dist_threshold=PATH_HEADING_THRESHOLD,
                   angular_disengage_threshold=PATH_HEADING_RELEASE,

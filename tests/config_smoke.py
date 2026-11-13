@@ -26,7 +26,7 @@ assert follow['max_vel_theta'] == TRACKING_YAW_SPEED == 0.30
 assert smoother['max_velocity'][2] == -smoother['min_velocity'][2] == YAW_SPEED == PATH_TURN_SPEED == 0.50
 assert follow['min_vel_x'] == smoother['min_velocity'][0] == 0.0
 assert follow['min_vel_y'] == follow['max_vel_y'] == 0.0
-assert follow['plugin'] == 'nav2_rotation_shim_controller::RotationShimController'
+assert follow['plugin'] == 'go2_navigation::PathAlignmentController'
 assert follow['primary_controller'] == 'dwb_core::DWBLocalPlanner'
 assert follow['angular_dist_threshold'] == PATH_HEADING_THRESHOLD
 assert follow['angular_disengage_threshold'] == PATH_HEADING_RELEASE < PATH_HEADING_THRESHOLD

@@ -54,6 +54,8 @@ bash go2_3d/run.sh navigation dense
 
 导航临时失败现在先取消旧路径，每次等待 2 秒，首次执行失败后最多重试三次；持续失败仍保留目标并暂停。
 恢复范围、离线验证及已知点位/TF问题见 [有限导航恢复](docs/NAVIGATION_RETRY.md)。
+定位正常却摆动/无进展时的控制接口修复、自动诊断及首次镜像重建步骤见
+[控制停滞处理](docs/NAVIGATION_CONTROL_STALL.md)。
 
 普通雷达导航的空启动参数已在 `run.sh` 中永久修复，无需再生成或运行
 `runtime/run-navigation-safe.sh`。更新代码后，现场 `farm12` 地图仍按原命令启动：
