@@ -115,6 +115,10 @@ def main():
         params.write_text(yaml.safe_dump({
             'bt_navigator': {'ros__parameters': {
                 'global_frame': 'map', 'robot_base_frame': 'base_footprint',
+                # Synthetic Python action workers can acknowledge after 20ms.
+                # Isolate transport scheduling from deliberate planning failures;
+                # this fixture timeout does not change robot configuration.
+                'default_server_timeout': 1000,
                 'default_nav_to_pose_bt_xml': tree, 'default_nav_through_poses_bt_xml': tree,
                 'plugin_lib_names': ['nav2_'+name+'_bt_node' for name in (
                     'compute_path_to_pose_action', 'follow_path_action', 'rate_controller',
@@ -179,12 +183,13 @@ def main():
             stationary_wait(1.6)
             wait_for(lambda: operator.route_paused and operator.goal_handle is None, 20)
             assert [round(p.pose.position.x, 2) for _, p in operator.waypoints] == [1.6, 2.0]
-            assert endpoints.plans[1.6] == 4 and endpoints.plans[2.0] == 0
+            # One initial successful plan, one failed replan, then three retries.
+            assert endpoints.plans[1.6] == 5 and endpoints.plans[2.0] == 0
             assert operator.completed_waypoints == 0
             count = sum(endpoints.plans.values())
             time.sleep(2.5)
             assert sum(endpoints.plans.values()) == count
-            print('PASS persistent failure: initial pipeline + two retries only; failed goal and later goal retained, paused without skipping', flush=True)
+            print('PASS persistent failure: initial pipeline + three retries only; failed goal and later goal retained, paused without skipping', flush=True)
             endpoints.mode = 'three'
             endpoints.resume.publish(Empty())
             wait_for(lambda: operator.completed_waypoints == 2, 15)

@@ -52,8 +52,17 @@ bash go2_3d/run.sh navigation dense
 等待GICP定位有效，选点后再启用运动。缺少所需 Nav2 插件时，
 仍按启动提示执行 `bash go2_3d/build.sh`；已具备插件的镜像无需为更换地图重建。
 
-导航临时失败现在先取消旧路径，等待 2 秒后最多重试两次；持续失败仍保留目标并暂停。
+导航临时失败现在先取消旧路径，每次等待 2 秒，首次执行失败后最多重试三次；持续失败仍保留目标并暂停。
 恢复范围、离线验证及已知点位/TF问题见 [有限导航恢复](docs/NAVIGATION_RETRY.md)。
+
+普通雷达导航的空启动参数已在 `run.sh` 中永久修复，无需再生成或运行
+`runtime/run-navigation-safe.sh`。更新代码后，现场 `farm12` 地图仍按原命令启动：
+
+```bash
+cd ~/go2_nav
+bash go2_3d/tools.sh use-map farm12
+bash go2_3d/run.sh navigation dense 0 0 0
+```
 
 ## 三维地图与定位链路
 

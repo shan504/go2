@@ -1,7 +1,7 @@
 # 有限导航恢复与停车排查
 
 `navigate.xml` 在整个 `PipelineSequence` 外使用 Humble 官方 `RecoveryNode`。
-初次执行失败后最多重试两次，每次通过官方 `Wait` 等待 2 秒，仍使用同一个
+初次执行失败后最多重试三次（初次执行加三次重试），每次通过官方 `Wait` 等待 2 秒，仍使用同一个
 `NavigateToPose` 目标。每个目标拥有独立的次数预算；正常完成后才推进下一个航点。
 这也会有限重试 FollowPath 返回的失败，不按未提供错误码的 Humble action 猜测失败原因。
 
@@ -23,6 +23,14 @@ FollowPath 的 `server_timeout=1000` 单位为毫秒，给 action 响应、取�
 所有地图、standard/dense、保存路线和点选路线使用同一棵树。
 普通 lidar 启动不再传入空的 `camera_calibration:=` 或 `session_directory:=`；
 非空 RTAB 参数仍原样传递，不生成标定数据。
+空参数修复已在正式 `run.sh` 中，无需再生成或运行 `runtime/run-navigation-safe.sh`。
+更新代码后，现场导航仍使用原命令：
+
+```bash
+cd ~/go2_nav
+bash go2_3d/tools.sh use-map farm12
+bash go2_3d/run.sh navigation dense 0 0 0
+```
 
 ## 本次现场证据与范围
 
@@ -55,6 +63,8 @@ Humble RotationShimController 的 `getSampledPathPt()` 在新路径上将采样�
 Wait behavior，ComputePathToPose/FollowPath 使用隔离的合成 action server，
 并接入真实 Operator。测试覆盖三个目标、暂时/持续规划失败、150ms 延迟取消、
 取消后的静止等待、人工恢复、停止/取消和定位暂停。合成运动记录不发布到底盘话题。
+合成 Python 规划器的应答等待设为 1 秒，隔离测试线程调度抖动；该测试验证恢复语义，
+不验证生产规划器默认 20ms 的通信应答期限，也不修改机器狗配置。
 `tests/navigation_grid_start_smoke.py` 执行实际启动脚本的 CLI 组装，验证空值省略和
 带空格非空参数保留。`build.sh` 包含新增恢复测试。
 
