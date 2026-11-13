@@ -77,6 +77,8 @@ sys.exit(0)
             assert failed_source.returncode != 0 and not failed_source.stdout
             assert 'initial_from_map_start:="$9"' in calls[-1][calls[-1].index('bash')-1]
             if mode == 'navigation':
+                assert 'Navigation baseline: 2026-11-05 d4244dc' in result.stdout
+                assert '/opt/go2_navigation/' not in shell
                 assert 'GO2_DIAGNOSTICS_SESSION=/diagnostics' in calls[-1]
                 mounts = [calls[-1][i+1] for i, item in enumerate(calls[-1][:-1]) if item == '-v']
                 assert any(value.endswith(':/diagnostics:rw') for value in mounts), mounts

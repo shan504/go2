@@ -61,7 +61,7 @@ class Mapper(Node):
         super().__init__('go2_gicp')
         defaults = dict(mode='mapping', map_directory='/maps/latest', output_directory='/maps', map_name='default',
                         voxel_size=0.15, map_voxel_size=0.06, keyframe_max_interval=2.0,
-                        scan_window=0.0, map_publish_period=2.0, publish_map_cloud=True,
+                        scan_window=0.0, map_publish_period=2.0,
                         grid_resolution=0.10, floor_z=-0.30,
                         obstacle_min_height=0.10, obstacle_max_height=1.5,
                         max_map_points=10000000, submap_radius=25.0,
@@ -72,8 +72,8 @@ class Mapper(Node):
                         localization_max_translation=1.0, localization_max_rotation_degrees=45.0,
                         localization_min_fitness=0.20, localization_max_rmse=0.20,
                         stationary_translation_limit=0.35, stationary_rotation_limit_degrees=12.0,
-                        localization_hold_timeout=5.0, localization_hold_distance=1.5,
-                        localization_hold_rotation_degrees=90.0, localization_odom_timeout=0.3,
+                        localization_hold_timeout=3.0, localization_hold_distance=1.0,
+                        localization_hold_rotation_degrees=60.0, localization_odom_timeout=0.3,
                         correction_alpha=0.25,auto_initialize=True,initial_from_map_start=True,
                         initial_x=0.0,initial_y=0.0,initial_z=0.0,initial_yaw_degrees=0.0)
         defaults.update(loop_closure_enabled=True, mapping_backend='lidar', map_frame='map')
@@ -182,8 +182,7 @@ class Mapper(Node):
         self.broadcaster = TransformBroadcaster(self)
         retained = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                               durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.map_pub = (self.create_publisher(PointCloud2, '/map_cloud', retained)
-                        if self.p['publish_map_cloud'] else None)
+        self.map_pub = self.create_publisher(PointCloud2, '/map_cloud', retained)
         self.registered_pub = self.create_publisher(PointCloud2, '/registered_cloud', qos_profile_sensor_data)
         if self.external_backend:
             # These are accepted GICP poses, never the native /odom estimate.
@@ -220,11 +219,7 @@ class Mapper(Node):
         # scan stamp after a registration finishes. Hold only a fresh accepted
         # map correction, timestamped by actual odometry (never future-dated).
         self.create_timer(0.05, self.publish_correction)
-        # Saved-map visualization runs in its own process in localization and
-        # navigation launches. Packing/publishing a complete multi-million
-        # point cloud must not occupy the health/TF callback group or its GIL.
-        if self.p['publish_map_cloud']:
-            self.create_timer(self.p['map_publish_period'], self.publish_map)
+        self.create_timer(self.p['map_publish_period'], self.publish_map)
         self.registration_timer = self.create_timer(self.p['registration_period'], self.process,
                                                     callback_group=MutuallyExclusiveCallbackGroup())
 
@@ -942,8 +937,6 @@ class Mapper(Node):
             self.last_tf_stamp = stamp.nanoseconds
 
     def publish_map(self):
-        if self.map_pub is None:
-            return
         if self.external_backend and not self.map_pub.get_subscription_count():
             return
         with self.lock:

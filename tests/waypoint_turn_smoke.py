@@ -11,6 +11,7 @@ sys.path.insert(0,str(project/'go2_3d'))
 from motion_profile import PATH_TURN_SPEED, TRACKING_YAW_SPEED, YAW_SPEED
 parameters = yaml.safe_load(Path('/runtime/config/nav2_3d.yaml').read_text())['controller_server']['ros__parameters']
 follow, progress = parameters['FollowPath'], parameters['progress_checker']
+assert follow['plugin'] == 'nav2_rotation_shim_controller::RotationShimController'
 assert follow['rotate_to_heading_angular_vel'] == PATH_TURN_SPEED == YAW_SPEED == 0.50
 assert follow['max_vel_theta'] == TRACKING_YAW_SPEED == 0.30
 assert follow['max_angular_accel'] == 0.60

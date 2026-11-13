@@ -56,8 +56,9 @@ Humble RotationShimController 的 `getSampledPathPt()` 在新路径上将采样�
 这能解释为何每秒新路径附近会出现比最新 map→base_footprint 晚几十毫秒的请求，
 但还不能证明机器人安装版本和每一条报错都来自这条路径。此次没有篡改时间戳、
 修改上游控制器或扩大 TF 容差，也不将它当作 GridBased 无路的已证实原因。
-后续对这条动态 TF 查询缺陷增加了专用导航插件与回归测试，见
-[控制停滞处理](NAVIGATION_CONTROL_STALL.md)；它不改变这里的有限重试和队列保留规则。
+历史上曾增加专用导航插件与回归测试，见 [控制停滞处理](NAVIGATION_CONTROL_STALL.md)。
+目前按用户要求恢复 11 月 5 日的官方 RotationShim，仍保留本文的三次重试和队列保留规则；
+恢复范围见 [11 月 5 日导航恢复](NAVIGATION_NOV5_RESTORE.md)。
 
 ## 离线验证
 

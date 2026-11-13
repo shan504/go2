@@ -1,5 +1,9 @@
 # 定位心跳与完整地图显示发布的隔离
 
+当前状态：按用户后续要求恢复 11 月 5 日核心定位/导航，本文的独立显示进程和
+5 秒／1.5 米／90°接续配置已停用。本文仅为历史分析与验证记录，
+当前行为见 [11 月 5 日导航恢复](NAVIGATION_NOV5_RESTORE.md)。
+
 2026-11-13 的故障摘要首先记录到诊断订阅者心跳超时，随后包含
 `Path alignment robot TF is stale or future-dated`，TF 年龄约 0.302–0.402 秒。
 后续窗口的运动桥报告 `odometry_timeout`，导航 action 为 `CANCELED`，13 个目标保留。

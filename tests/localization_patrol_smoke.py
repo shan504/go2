@@ -106,7 +106,7 @@ def main():
             next_match()
             wait_for(lambda: sensors.valid is True)
             assert mapper.last_accepted>accepted
-            print('PASS one missing scan: unchanged prior/reference and original acceptance deadline; a genuine fresh match recovers',flush=True)
+            print('PASS one missing scan: unchanged prior/reference and original 3s deadline; a genuine fresh match recovers',flush=True)
 
             # Even with fresh DDS clouds and odometry, repeated bad scans must
             # expire the old acceptance. They cannot perpetually renew it.
@@ -124,7 +124,7 @@ def main():
             next_match()
             next_match()
             wait_for(lambda: sensors.valid is True)
-            print('PASS persistent missing scans: configured acceptance deadline expires, localization invalid and map TF stops despite fresh DDS input',flush=True)
+            print('PASS persistent missing scans: old 3s deadline expires, localization invalid and map TF stops despite fresh DDS input',flush=True)
 
             for pose in (pose_matrix([0.40,0.,0.],[0.,0.,0.,1.]),
                          pose_matrix([0.,0.,0.],[0.,0.,np.sin(np.deg2rad(15.)/2),np.cos(np.deg2rad(15.)/2)])):

@@ -62,7 +62,7 @@ class Controller(Node):
         self.declare_parameter('controller_frequency', 10.0)
         self.declare_parameter('FollowPath.max_vel_x', 0.15)
         self.declare_parameter('FollowPath.max_speed_xy', 0.15)
-        self.declare_parameter('FollowPath.plugin', 'go2_navigation::PathAlignmentController')
+        self.declare_parameter('FollowPath.plugin', 'nav2_rotation_shim_controller::RotationShimController')
         self.declare_parameter('FollowPath.primary_controller', 'dwb_core::DWBLocalPlanner')
         self.declare_parameter('FollowPath.closed_loop', False)
         self.declare_parameter('progress_checker.plugin', 'nav2_controller::PoseProgressChecker')

@@ -23,11 +23,9 @@ go2_gicp:
     validity_timeout: 1.0
     # Bounded dead reckoning from the last accepted scan. Never renewed by
     # bad/empty scans; require cloud <=1s and real odometry <=0.3s throughout.
-    # Patrol continuity: stop at the first elapsed-time/travel/turn limit.
-    # This extends accepted-correction hold, not native sensor freshness.
-    localization_hold_timeout: 5.0
-    localization_hold_distance: 1.5
-    localization_hold_rotation_degrees: 90.0
+    localization_hold_timeout: 3.0
+    localization_hold_distance: 1.0
+    localization_hold_rotation_degrees: 60.0
     localization_odom_timeout: 0.3
     # Independent recovery after previously accepted localization is lost.
     # Does not weaken normal GICP or extend the dead-reckoning limits above.

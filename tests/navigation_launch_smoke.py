@@ -52,6 +52,8 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
         diagnostics = next(action for action in description.entities
                            if isinstance(action, Node) and action._Node__node_name == 'go2_navigation_diagnostics')
         assert diagnostics.condition.evaluate(context) == (mode == 'navigation')
+        assert not any(isinstance(action, Node) and action._Node__node_name == 'go2_saved_map_cloud'
+                       for action in description.entities)
         mapper_action = next(action for action in description.entities
                              if isinstance(action, OpaqueFunction) and any(
                                  isinstance(node, Node) and node._Node__node_name == 'go2_gicp'
@@ -70,17 +72,8 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
                 else:
                     values.update(value)
             assert values['mode'] == ('mapping' if mode == 'mapping' else 'localization')
-            assert values.get('publish_map_cloud', True) == (mode == 'mapping')
-            if mode == 'mapping':
-                assert len(mapper_nodes) == 1
-            else:
-                assert len(mapper_nodes) == 2
-                display = mapper_nodes[1]
-                assert display._Node__node_name == 'go2_saved_map_cloud'
-                display_values = evaluate_parameters(context, display._Node__parameters)[0]
-                assert display_values['map_directory'] == values['map_directory']
-                assert display_values['map_frame'] == values.get('map_frame', 'map')
-                assert display_values['map_publish_period'] == values.get('map_publish_period', 2.0)
+            assert len(mapper_nodes) == 1
+            assert 'publish_map_cloud' not in values
             assert values['map_directory'] == '/runtime/navigation_map'
             assert values['auto_initialize'] is True
             assert values['initial_from_map_start'] is True
@@ -101,9 +94,9 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
             assert values['min_fitness'] == 0.55
             assert values['max_rmse'] == 0.20
             assert values['validity_timeout'] == 1.0
-            assert values['localization_hold_timeout'] == 5.0
-            assert values['localization_hold_distance'] == 1.5
-            assert values['localization_hold_rotation_degrees'] == 90.0
+            assert values['localization_hold_timeout'] == 3.0
+            assert values['localization_hold_distance'] == 1.0
+            assert values['localization_hold_rotation_degrees'] == 60.0
             assert values['localization_odom_timeout'] == 0.3
             assert values['stationary_translation_limit'] == 0.35
             assert values['stationary_rotation_limit_degrees'] == 12.0
@@ -121,7 +114,6 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
             probe = RosNode('go2_gicp')
             try:
                 assert probe.declare_parameter('max_map_points', 0).value == 10000000
-                assert probe.declare_parameter('publish_map_cloud', True).value == (mode == 'mapping')
                 for name in ('scan_window', 'map_voxel_size', 'validity_timeout',
                              'localization_hold_timeout', 'localization_hold_distance',
                              'localization_hold_rotation_degrees', 'localization_odom_timeout',
