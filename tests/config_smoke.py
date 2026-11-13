@@ -79,6 +79,10 @@ children = {j.find('child').get('link') for j in urdf.findall('joint')}
 assert links-children == {'base_link'},'Generated URDF contains an orphan navigation frame'
 assert params['bt_navigator']['ros__parameters']['robot_base_frame'] == 'base_footprint'
 assert params['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml'].endswith('/go2_3d/navigate.xml')
+bt_params = params['bt_navigator']['ros__parameters']
+assert {'nav2_recovery_node_bt_node', 'nav2_wait_action_bt_node'} <= set(bt_params['plugin_lib_names'])
+assert 'wait' in params['behavior_server']['ros__parameters']['behavior_plugins']
+assert params['behavior_server']['ros__parameters']['wait']['plugin'] == 'nav2_behaviors/Wait'
 behavior = ET.parse(root/'go2_3d/navigate.xml')
 assert not list(behavior.iter('Spin')) and not list(behavior.iter('BackUp'))
 assert list(behavior.iter('FollowPath'))[0].get('goal_checker_id') == 'general_goal_checker'

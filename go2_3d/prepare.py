@@ -75,7 +75,21 @@ def main(mode='mapping'):
     follow['ObstacleFootprint.scale'] = 1.0
     nav['bt_navigator']['ros__parameters'].update(global_frame='map',robot_base_frame='base_footprint',odom_topic='/odom',
         default_nav_to_pose_bt_xml='/opt/go2_project/go2_3d/navigate.xml')
-    nav['behavior_server']['ros__parameters']['robot_base_frame'] = 'base_footprint'
+    # SDK presets vary: explicitly retain/register the nodes used by our BT.
+    bt = nav['bt_navigator']['ros__parameters']
+    libraries = bt.setdefault('plugin_lib_names', [])
+    for library in ('nav2_compute_path_to_pose_action_bt_node',
+                    'nav2_follow_path_action_bt_node', 'nav2_rate_controller_bt_node',
+                    'nav2_pipeline_sequence_bt_node', 'nav2_recovery_node_bt_node',
+                    'nav2_wait_action_bt_node'):
+        if library not in libraries:
+            libraries.append(library)
+    behavior = nav['behavior_server']['ros__parameters']
+    behavior['robot_base_frame'] = 'base_footprint'
+    plugins = behavior.setdefault('behavior_plugins', [])
+    if 'wait' not in plugins:
+        plugins.append('wait')
+    behavior.setdefault('wait', {})['plugin'] = 'nav2_behaviors/Wait'
     (output/'nav2_3d.yaml').write_text(yaml.safe_dump(nav,sort_keys=False))
     if mode in ('localization', 'navigation'):
         prepare_navigation_grid('/maps', '/runtime/navigation_map')

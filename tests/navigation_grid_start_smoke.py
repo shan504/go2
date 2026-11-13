@@ -51,7 +51,28 @@ sys.exit(0)
             launch_arguments = calls[-1][calls[-1].index('bash')+1:]
             assert launch_arguments[:2] == [mode, '/opt/go2_project/go2_3d/'+
                                            ('gicp_dense.yaml' if profile == 'dense' else 'gicp.yaml')]
-            assert launch_arguments[2:] == ['true','0.0','0.0','0.0','0.0','default','true']
+            assert launch_arguments[2:] == ['true','0.0','0.0','0.0','0.0','default','true','lidar','','']
+            # Execute the actual shell command with harmless source/ros2 shims.
+            # This catches empty ROS CLI values, unlike recording Docker alone.
+            shell = calls[-1][calls[-1].index('-c')+1]
+            capture = commands/'ros2'
+            capture.write_text('#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n')
+            capture.chmod(0o755)
+            for calibration, session in (('', ''), ('', '/maps/session one'),
+                                         ('/calibration/measured camera.yaml', ''),
+                                         ('/calibration/measured camera.yaml', '/maps/session one')):
+                args = launch_arguments[:-2] + [calibration, session]
+                launched = subprocess.run(['bash', '-c', 'source() { :; }; '+shell, 'bash', *args],
+                                          env=environment, capture_output=True, text=True, check=True)
+                cli = json.loads(launched.stdout)
+                assert all(not arg.endswith(':=') for arg in cli), cli
+                assert ('camera_calibration:='+calibration in cli) == bool(calibration), cli
+                assert ('session_directory:='+session in cli) == bool(session), cli
+                assert 'loop_backend:=lidar' in cli
+            failed_source = subprocess.run(['bash', '-c', 'source() { return 1; }; '+shell,
+                                             'bash', *launch_arguments], env=environment,
+                                            capture_output=True, text=True)
+            assert failed_source.returncode != 0 and not failed_source.stdout
             assert 'initial_from_map_start:="$9"' in calls[-1][calls[-1].index('bash')-1]
             assert ('no /initialpose clicks required' in result.stdout) == (mode != 'mapping')
             if mode != 'mapping':
@@ -64,7 +85,7 @@ sys.exit(0)
                     explicit_arguments = explicit[explicit.index('bash')+1:]
                     assert explicit_arguments[2:] == ['true',*coordinates[:3],
                                                       coordinates[3] if len(coordinates)==4 else '0.0',
-                                                      'default','false']
+                                                      'default','false','lidar','','']
                     assert 'no /initialpose clicks required' not in result.stdout
     environment['GO2_PREPARE_EXIT'] = '1'
     logfile.write_text('')

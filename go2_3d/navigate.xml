@@ -1,11 +1,18 @@
-<!-- Indoor debugging: planning failure aborts without automatic spin/back-up. -->
+<!-- Retry the entire navigation pipeline, never only the planner: a failed
+     replan must halt/cancel FollowPath before entering the stationary wait.
+     Two retries per NavigateToPose goal; no costmap clearing, spin or backup.
+     FollowPath gets a scoped 1s action RPC/cancel timeout (not a TF tolerance).
+     External action cancellation halts the wait and resets the retry state. -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <PipelineSequence name="NavigateWithReplanning">
-      <RateController hz="1.0">
-        <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-      </RateController>
-      <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker"/>
-    </PipelineSequence>
+    <RecoveryNode name="NavigateWithLimitedRetry" number_of_retries="2">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+        </RateController>
+        <FollowPath path="{path}" controller_id="FollowPath" goal_checker_id="general_goal_checker" server_timeout="1000"/>
+      </PipelineSequence>
+      <Wait wait_duration="2" server_timeout="1000"/>
+    </RecoveryNode>
   </BehaviorTree>
 </root>

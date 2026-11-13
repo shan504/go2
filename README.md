@@ -52,6 +52,9 @@ bash go2_3d/run.sh navigation dense
 等待GICP定位有效，选点后再启用运动。缺少所需 Nav2 插件时，
 仍按启动提示执行 `bash go2_3d/build.sh`；已具备插件的镜像无需为更换地图重建。
 
+导航临时失败现在先取消旧路径，等待 2 秒后最多重试两次；持续失败仍保留目标并暂停。
+恢复范围、离线验证及已知点位/TF问题见 [有限导航恢复](docs/NAVIGATION_RETRY.md)。
+
 ## 三维地图与定位链路
 
 ```text

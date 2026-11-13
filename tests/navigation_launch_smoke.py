@@ -10,7 +10,7 @@ from rclpy.node import Node as RosNode
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchContext, LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction, OpaqueFunction
-from launch_ros.actions import SetRemap
+from launch_ros.actions import SetRemap, Node
 from launch_ros.utilities import evaluate_parameters
 from launch.launch_description_sources import PythonLaunchDescriptionSource, FrontendLaunchDescriptionSource
 from launch.utilities import perform_substitutions, normalize_to_list_of_substitutions
@@ -48,7 +48,11 @@ with patch('ament_index_python.packages.get_package_share_directory', side_effec
         context.launch_configurations['send_buffer_limit'] = '536870912'
         assert perform_substitutions(context, buffer_argument) == '536870912'
         context.launch_configurations['send_buffer_limit'] = '268435456'
-        mapper_action = next(action for action in description.entities if isinstance(action, OpaqueFunction))
+        # Backend validation is also an OpaqueFunction and returns no nodes.
+        mapper_action = next(action for action in description.entities
+                             if isinstance(action, OpaqueFunction) and any(
+                                 isinstance(node, Node) and node._Node__node_name == 'go2_gicp'
+                                 for node in (action.execute(context) or [])))
         for profile in ('standard', 'dense'):
             context.launch_configurations['gicp_params'] = str(
                 project/'go2_3d'/('gicp_dense.yaml' if profile == 'dense' else 'gicp.yaml'))

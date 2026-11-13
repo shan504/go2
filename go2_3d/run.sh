@@ -108,4 +108,10 @@ sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --
   -v "$project_dir:/opt/go2_project:ro" \
   -v "$project_dir/runtime:/runtime:ro" -v "$project_dir/maps:/maps:rw" \
   "${backend_mounts[@]}" --entrypoint /bin/bash "$image" -c \
-  'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7" map_name:="$8" initial_from_map_start:="$9" loop_backend:="${10}" camera_calibration:="${11}" session_directory:="${12}"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z" "$map_name" "$initial_from_map_start" "$loop_backend" "$camera_calibration" "$session_directory"
+  'set -e
+   source /opt/ros/humble/setup.bash
+   source /ros2_ws/install/setup.bash
+   optional_args=()
+   [[ -z "${11}" ]] || optional_args+=("camera_calibration:=${11}")
+   [[ -z "${12}" ]] || optional_args+=("session_directory:=${12}")
+   exec ros2 launch /opt/go2_project/go2_3d/stack.launch.py mode:="$1" gicp_params:="$2" auto_initialize:="$3" initial_x:="$4" initial_y:="$5" initial_yaw_degrees:="$6" initial_z:="$7" map_name:="$8" initial_from_map_start:="$9" loop_backend:="${10}" "${optional_args[@]}"' bash "$mode" "$gicp_params" "$auto_initialize" "$initial_x" "$initial_y" "$initial_yaw" "$initial_z" "$map_name" "$initial_from_map_start" "$loop_backend" "$camera_calibration" "$session_directory"
