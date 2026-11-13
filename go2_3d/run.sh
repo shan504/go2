@@ -3,6 +3,10 @@ set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:-mapping}"
 profile="${2:-standard}"
+if [[ "$mode" == navigation && "${GO2_DIAGNOSTICS_CAPTURE_ACTIVE:-}" != 1 ]]; then
+  exec python3 "$project_dir/go2_3d/capture_navigation.py" --project "$project_dir" -- \
+    bash "$project_dir/go2_3d/run.sh" "$@"
+fi
 case "$mode" in mapping|localization|navigation) ;; *) echo 'Usage: run.sh mapping [standard|dense] [MAP_NAME] | run.sh [localization|navigation] [standard|dense] [X Y YAW_DEGREES [Z]]' >&2; exit 2 ;; esac
 case "$profile" in standard|dense) ;; *) echo 'Profile must be standard or dense' >&2; exit 2 ;; esac
 loop_backend="${GO2_LOOP_BACKEND:-lidar}"
@@ -10,6 +14,9 @@ case "$loop_backend" in lidar|rtabmap) ;; *) echo 'GO2_LOOP_BACKEND must be lida
 image=go2-3d:edu
 backend_mounts=()
 backend_environment=()
+diagnostics_mounts=()
+diagnostics_environment=()
+diagnostics_labels=()
 camera_calibration=''
 session_directory=''
 if [[ "$loop_backend" == rtabmap ]]; then
@@ -53,7 +60,32 @@ if [[ "$mode" != mapping ]]; then
   done
 fi
 mkdir -p "$project_dir/maps" "$project_dir/runtime"
-sudo docker image inspect "$image" >/dev/null
+if [[ "$mode" == navigation && -n "${GO2_DIAGNOSTICS_SESSION:-}" ]]; then
+  session_host="${GO2_DIAGNOSTICS_SESSION}"
+  # The host wrapper owns the session; only this subdirectory is writable by
+  # the recorder. Application source/configuration stays read-only.
+  session_id="$(basename -- "$session_host")"
+  diagnostics_mounts=(-v "$session_host:/diagnostics:rw")
+  diagnostics_environment=(-e GO2_DIAGNOSTICS_SESSION=/diagnostics
+    -e "GO2_DIAGNOSTICS_UID=$(id -u)" -e "GO2_DIAGNOSTICS_GID=$(id -g)")
+  diagnostics_labels=(--label "go2.diagnostics.session=$session_id")
+  echo "Navigation diagnostics session: $session_host"
+fi
+if [[ "$mode" == navigation && -n "${GO2_DIAGNOSTICS_SESSION:-}" ]]; then
+  navigation_image_id="$(sudo docker image inspect --format '{{.Id}}' "$image")"
+  python3 - "$project_dir" "$session_host" "$image" "$navigation_image_id" <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(sys.argv[1])/'go2_3d'))
+try:
+    from fault_store import EventStore
+    EventStore(sys.argv[2]).write_manifest({'image': {'name': sys.argv[3], 'id': sys.argv[4] or None}})
+except Exception as error:
+    print(f'Navigation diagnostic image metadata unavailable: {error}', file=sys.stderr)
+PY
+else
+  sudo docker image inspect "$image" >/dev/null
+fi
 if [[ "$mode" == navigation ]]; then
   sudo docker run --rm --network none --entrypoint /bin/bash \
     -v "$project_dir/maps:/maps:ro" -v "$project_dir:/opt/go2_project:ro" go2-3d:edu -c \
@@ -100,14 +132,16 @@ if [[ "$mode" != mapping && "$initial_from_map_start" == true ]]; then
   echo 'Wait for accepted GICP localization before enabling motion. Motion stays disabled.'
 fi
 sudo docker run --rm -it --init --name go2-3d --label go2.project=shan504/go2 --network host \
+  "${diagnostics_labels[@]}" \
   -e OMP_NUM_THREADS=2 -e OPENBLAS_NUM_THREADS=1 \
   -e ROS_DOMAIN_ID=0 -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
   -e CYCLONEDDS_URI=file:///etc/cyclonedds.xml \
   "${backend_environment[@]}" \
+  "${diagnostics_environment[@]}" \
   -v "$dds_file:/etc/cyclonedds.xml:ro" \
   -v "$project_dir:/opt/go2_project:ro" \
   -v "$project_dir/runtime:/runtime:ro" -v "$project_dir/maps:/maps:rw" \
-  "${backend_mounts[@]}" --entrypoint /bin/bash "$image" -c \
+  "${backend_mounts[@]}" "${diagnostics_mounts[@]}" --entrypoint /bin/bash "$image" -c \
   'set -e
    source /opt/ros/humble/setup.bash
    source /ros2_ws/install/setup.bash

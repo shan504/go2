@@ -12,6 +12,8 @@ with tempfile.TemporaryDirectory() as tmp:
     checkout = root/'project with spaces'
     (checkout/'go2_3d').mkdir(parents=True)
     shutil.copy2(project/'go2_3d/run.sh', checkout/'go2_3d/run.sh')
+    for name in ('capture_navigation.py', 'fault_store.py'):
+        shutil.copy2(project/'go2_3d'/name, checkout/'go2_3d'/name)
     maps = checkout/'maps/latest'; maps.mkdir(parents=True)
     for name in ('map.pcd', 'nav.yaml', 'metadata.yaml'):
         (maps/name).write_text('fixture')
@@ -74,6 +76,11 @@ sys.exit(0)
                                             capture_output=True, text=True)
             assert failed_source.returncode != 0 and not failed_source.stdout
             assert 'initial_from_map_start:="$9"' in calls[-1][calls[-1].index('bash')-1]
+            if mode == 'navigation':
+                assert 'GO2_DIAGNOSTICS_SESSION=/diagnostics' in calls[-1]
+                mounts = [calls[-1][i+1] for i, item in enumerate(calls[-1][:-1]) if item == '-v']
+                assert any(value.endswith(':/diagnostics:rw') for value in mounts), mounts
+                assert any(value.startswith('go2.diagnostics.session=') for value in calls[-1])
             assert ('no /initialpose clicks required' in result.stdout) == (mode != 'mapping')
             if mode != 'mapping':
                 for coordinates in (['1.25','-0.4','35'], ['1.25','-0.4','35','0.37']):

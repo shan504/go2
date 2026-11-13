@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:-check}" in
+  faults|fault-show|fault-export|fault-sessions)
+    project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+    case "$1" in
+      faults|fault-sessions)
+        [[ $# == 1 ]] || { echo 'Usage: tools.sh faults | fault-sessions' >&2; exit 2; }
+        action=list
+        [[ "$1" == fault-sessions ]] && action=sessions
+        exec python3 "$project_dir/go2_3d/fault_cli.py" --root "$project_dir/runtime/diagnostics" "$action"
+        ;;
+      fault-show|fault-export)
+        [[ $# -le 2 ]] || { echo 'Usage: tools.sh fault-show [latest|ID] | fault-export [latest|ID]' >&2; exit 2; }
+        exec python3 "$project_dir/go2_3d/fault_cli.py" --root "$project_dir/runtime/diagnostics" "${1#fault-}" "${2:-latest}"
+        ;;
+    esac
+    ;;
   route-save|route-load|route-run)
     [[ $# == 2 || ( "$1" == route-save && $# == 3 && "$3" == --overwrite ) ]] || {
       echo 'Usage: tools.sh route-save NAME [--overwrite] | route-load NAME | route-run NAME' >&2; exit 2;
@@ -149,5 +164,5 @@ PY
   shell)
     sudo docker exec -it go2-3d bash -c 'source /opt/ros/humble/setup.bash && source /ros2_ws/install/setup.bash && exec bash --norc'
     ;;
-  *) echo 'Usage: tools.sh [route-save NAME [--overwrite]|route-load NAME|route-run NAME|route-list|route-show NAME|archive-map NAME [--all]|use-map NAME [VERSION]|maps|resume|cancel|restart-navigation [standard|dense]|export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|drivecheck-native|drivecheck-balanced|drivecheck-walk|save|enable|disable|shell]' >&2; exit 2 ;;
+  *) echo 'Usage: tools.sh [faults|fault-show [latest|ID]|fault-export [latest|ID]|fault-sessions|route-save NAME [--overwrite]|route-load NAME|route-run NAME|route-list|route-show NAME|archive-map NAME [--all]|use-map NAME [VERSION]|maps|resume|cancel|restart-navigation [standard|dense]|export-map|repair-map|level-map|clean-map|inflation-5cm|check|diagnose|navcheck GOAL_X GOAL_Y|motioncheck [SECONDS]|robotcheck [SECONDS]|drivecheck|drivecheck-native|drivecheck-balanced|drivecheck-walk|save|enable|disable|shell]' >&2; exit 2 ;;
 esac
